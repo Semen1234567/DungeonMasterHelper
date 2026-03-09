@@ -1,0 +1,56 @@
+[
+  {
+    "id": "cc0aaa56",
+    "name": "Forest",
+    "image_path": "D:\\dnd_soundboard\\campaigns\\ashofgods\\maps\\cc0aaa56.jpg",
+    "grid_rows": 20,
+    "grid_cols": 20,
+    "tokens": [
+      {
+        "id": "b457026d",
+        "name": "afaf",
+        "token_type": "player",
+        "grid_x": 8,
+        "grid_y": 19,
+        "color": "#a6e3a1",
+        "label": "AF"
+      },
+      {
+        "id": "96dc2339",
+        "name": "afaf",
+        "token_type": "npc",
+        "grid_x": 6,
+        "grid_y": 18,
+        "color": "#89b4fa",
+        "label": "AF"
+      },
+      {
+        "id": "d0d4dd8d",
+        "name": "hui",
+        "token_type": "enemy",
+        "grid_x": 8,
+        "grid_y": 6,
+        "color": "#f38ba8",
+        "label": "HU"
+      }
+    ]
+  },
+  {
+    "id": "637dcd79",
+    "name": "Test",
+    "image_path": "D:\\dnd_soundboard\\campaigns\\ashofgods\\maps\\637dcd79.png",
+    "grid_rows": 20,
+    "grid_cols": 20,
+    "tokens": [
+      {
+        "id": "4d2332ce",
+        "name": "afaf",
+        "token_type": "player",
+        "grid_x": 8,
+        "grid_y": 19,
+        "color": "#a6e3a1",
+        "label": "AF"
+      }
+    ]
+  }
+]
