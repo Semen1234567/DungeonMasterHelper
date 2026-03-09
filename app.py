@@ -1827,6 +1827,7 @@ class DnDSoundboard(TkinterDnD.Tk if HAS_DND else tk.Tk):
         # Extra guard: control characters (e.g. Ctrl+V sends ) can appear
         # with unreliable state flags after focus/minimize changes on some systems.
         if event.char and ord(event.char) < 32:
+        # Do not consume standard shortcuts like Ctrl+V/C/X, Alt+*, Cmd+*.
             return
 
         w = event.widget
