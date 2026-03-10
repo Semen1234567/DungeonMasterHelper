@@ -1255,30 +1255,33 @@ class BattleMapTab(tk.Frame):
 
         self._canvas.configure(scrollregion=(0, 0, canvas_w, canvas_h))
 
-        # Cell size
-        cell_w = canvas_w / cols
-        cell_h = canvas_h / rows
+        # Pixel-aligned grid coordinates prevent visual jitter on non-even divisions
+        x_lines = [round(c * canvas_w / cols) for c in range(cols + 1)]
+        y_lines = [round(r * canvas_h / rows) for r in range(rows + 1)]
 
         # Draw grid lines
-        for r in range(rows + 1):
-            y = r * cell_h
+        for y in y_lines:
             self._canvas.create_line(0, y, canvas_w, y,
-                                     fill="#ffffff", stipple="gray25",
+                                     fill="#ffffff", width=1,
                                      tags="grid")
-        for c in range(cols + 1):
-            x = c * cell_w
+        for x in x_lines:
             self._canvas.create_line(x, 0, x, canvas_h,
-                                     fill="#ffffff", stipple="gray25",
+                                     fill="#ffffff", width=1,
                                      tags="grid")
 
         # Draw tokens
         for token in bmap.tokens:
-            self._draw_token(token, cell_w, cell_h)
+            self._draw_token(token, canvas_w, canvas_h, rows, cols)
 
-    def _draw_token(self, token, cell_w, cell_h):
-        cx = token.grid_x * cell_w + cell_w / 2
-        cy = token.grid_y * cell_h + cell_h / 2
-        radius = min(cell_w, cell_h) * 0.4
+    def _draw_token(self, token, canvas_w, canvas_h, rows, cols):
+        left = round(token.grid_x * canvas_w / cols)
+        right = round((token.grid_x + 1) * canvas_w / cols)
+        top = round(token.grid_y * canvas_h / rows)
+        bottom = round((token.grid_y + 1) * canvas_h / rows)
+
+        cx = (left + right) / 2
+        cy = (top + bottom) / 2
+        radius = min(right - left, bottom - top) * 0.4
 
         # Circle
         self._canvas.create_oval(
@@ -1340,11 +1343,8 @@ class BattleMapTab(tk.Frame):
             canvas_w = cols * 40
             canvas_h = rows * 40
 
-        cell_w = canvas_w / cols
-        cell_h = canvas_h / rows
-
-        gx = int(cx / cell_w)
-        gy = int(cy / cell_h)
+        gx = int(cx * cols / canvas_w)
+        gy = int(cy * rows / canvas_h)
         gx = max(0, min(gx, cols - 1))
         gy = max(0, min(gy, rows - 1))
 
@@ -1377,11 +1377,8 @@ class BattleMapTab(tk.Frame):
             canvas_w = cols * 40
             canvas_h = rows * 40
 
-        cell_w = canvas_w / cols
-        cell_h = canvas_h / rows
-
-        gx = int(cx / cell_w)
-        gy = int(cy / cell_h)
+        gx = int(cx * cols / canvas_w)
+        gy = int(cy * rows / canvas_h)
         gx = max(0, min(gx, cols - 1))
         gy = max(0, min(gy, rows - 1))
 
@@ -1822,6 +1819,16 @@ class DnDSoundboard(TkinterDnD.Tk if HAS_DND else tk.Tk):
             self.deiconify()
 
     def _on_global_key(self, event):
+        # Never handle modified/system shortcuts in the soundboard handler.
+        modifier_mask = 0x4 | 0x8 | 0x20000  # Ctrl / Alt / Command(Mac)
+        if event.state & modifier_mask:
+            return
+
+        # Extra guard: control characters (e.g. Ctrl+V sends ) can appear
+        # with unreliable state flags after focus/minimize changes on some systems.
+        if event.char and ord(event.char) < 32:
+            return
+
         w = event.widget
         if isinstance(w, (tk.Entry, ttk.Entry, ttk.Combobox, tk.Text)):
             return
