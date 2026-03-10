@@ -1,20 +1,3 @@
-"""
-app.py  --  D&D Soundboard + Campaign Manager + Battle Map  (dark-themed GUI)
-==============================================================================
-Modern dark UI with campaign profiles, soundboard, character management,
-and interactive battle maps with grid overlay and draggable tokens.
-
-Tabs:
-  - SOUNDBOARD : three-panel audio (Ambient / Stingers / Fast Stingers)
-  - CHARACTERS : enemies & key NPCs with full D&D stat blocks
-  - BATTLE MAP  : load maps, overlay grid, place & drag tokens
-
-On startup a campaign selector is shown.  Each campaign has its own
-tracks, characters, and maps.
-
-Requires: pygame-ce, Pillow, tkinterdnd2 (optional)
-"""
-
 import os
 import sys
 import logging
@@ -1291,40 +1274,80 @@ class BattleMapTab(tk.Frame):
             self._canvas.create_rectangle(0, 0, canvas_w, canvas_h, fill="#2a2a3a", outline="", tags="bg")
 
         self._canvas.configure(scrollregion=(0, 0, canvas_w, canvas_h))
+
+        # Pixel-aligned grid coordinates prevent visual jitter on non-even divisions
         x_lines = [round(c * canvas_w / cols) for c in range(cols + 1)]
         y_lines = [round(r * canvas_h / rows) for r in range(rows + 1)]
+
+        # Draw grid lines
         for y in y_lines:
-            self._canvas.create_line(0, y, canvas_w, y, fill="#ffffff", width=1, tags="grid")
+            self._canvas.create_line(0, y, canvas_w, y,
+                                     fill="#ffffff", width=1,
+                                     tags="grid")
         for x in x_lines:
-            self._canvas.create_line(x, 0, x, canvas_h, fill="#ffffff", width=1, tags="grid")
+            self._canvas.create_line(x, 0, x, canvas_h,
+                                     fill="#ffffff", width=1,
+                                     tags="grid")
 
-        current_id = self._turn_order[self._turn_index] if self._turn_order else None
+        # Draw tokens
         for token in bmap.tokens:
-            self._draw_token(token, canvas_w, canvas_h, rows, cols, token.id == current_id)
+            self._draw_token(token, canvas_w, canvas_h, rows, cols)
 
-    def _draw_token(self, token, canvas_w, canvas_h, rows, cols, is_current=False):
+    def _draw_token(self, token, canvas_w, canvas_h, rows, cols):
         left = round(token.grid_x * canvas_w / cols)
         right = round((token.grid_x + 1) * canvas_w / cols)
         top = round(token.grid_y * canvas_h / rows)
         bottom = round((token.grid_y + 1) * canvas_h / rows)
+
         cx = (left + right) / 2
         cy = (top + bottom) / 2
         radius = min(right - left, bottom - top) * 0.4
 
-        outline = C["amber"] if is_current else C["token_outline"]
-        self._canvas.create_oval(cx - radius, cy - radius, cx + radius, cy + radius,
-                                 fill=token.color, outline=outline, width=3 if is_current else 2,
-                                 tags=(f"token_{token.id}", "token"))
-        self._canvas.create_text(cx, cy, text=token.label, fill=C["bg"],
-                                 font=("Segoe UI", max(8, int(radius * 0.7)), "bold"),
-                                 tags=(f"token_{token.id}", "token"))
-        hp_text = f"HP {token.current_hp}/{token.max_hp}"
-        if token.is_down:
-            hp_text += f"  DS {token.death_success}/{token.death_fail}"
-        self._canvas.create_text(cx, cy - radius - 18, text=hp_text, fill=C["amber"],
-                                 font=FONT_TINY, tags=(f"token_{token.id}", "token"))
-        self._canvas.create_text(cx, cy - radius - 6, text=f"{token.name} (I{token.initiative})",
-                                 fill=C["fg"], font=FONT_TINY, tags=(f"token_{token.id}", "token"))
+        # Circle
+        self._canvas.create_oval(
+            cx - radius, cy - radius, cx + radius, cy + radius,
+            fill=token.color, outline=C["token_outline"], width=2,
+            tags=(f"token_{token.id}", "token"))
+
+        # Label text
+        self._canvas.create_text(
+            cx, cy, text=token.label, fill=C["bg"],
+            font=("Segoe UI", max(8, int(radius * 0.7)), "bold"),
+            tags=(f"token_{token.id}", "token"))
+
+        # Name tooltip above
+        self._canvas.create_text(
+            cx, cy - radius - 6, text=token.name,
+            fill=C["fg"], font=FONT_TINY,
+            tags=(f"token_{token.id}", "token"))
+
+    # ------------------------------------------------------------------
+    # Token management
+    # ------------------------------------------------------------------
+    def _add_token(self, token_type):
+        if not self._current_map:
+            messagebox.showinfo("Info", "Load a map first.", parent=self.winfo_toplevel())
+            return
+        name = simpledialog.askstring(
+            "New Token",
+            f"Name for {token_type}:",
+            parent=self.winfo_toplevel())
+        if not name or not name.strip():
+            return
+        name = name.strip()
+        label = simpledialog.askstring(
+            "Token Label",
+            f"Short label (1-3 chars, e.g. initials):",
+            initialvalue=name[:2].upper(),
+            parent=self.winfo_toplevel())
+        if not label:
+            label = name[:2].upper()
+
+        token = MapToken(name=name, token_type=token_type,
+                         grid_x=0, grid_y=0, label=label[:3].upper())
+        self._current_map.add_token(token)
+        self._cm.update_map(self._cid, self._current_map)
+        self._redraw()
 
     def _find_token_at_canvas(self, cx, cy):
         if not self._current_map:
@@ -1337,6 +1360,7 @@ class BattleMapTab(tk.Frame):
         else:
             canvas_w = cols * 40
             canvas_h = rows * 40
+
         gx = int(cx * cols / canvas_w)
         gy = int(cy * rows / canvas_h)
         gx = max(0, min(gx, cols - 1))
@@ -1360,9 +1384,14 @@ class BattleMapTab(tk.Frame):
         else:
             canvas_w = cols * 40
             canvas_h = rows * 40
-        gx = max(0, min(int(cx * cols / canvas_w), cols - 1))
-        gy = max(0, min(int(cy * rows / canvas_h), rows - 1))
-        for token in self._current_map.tokens:
+
+        gx = int(cx * cols / canvas_w)
+        gy = int(cy * rows / canvas_h)
+        gx = max(0, min(gx, cols - 1))
+        gy = max(0, min(gy, rows - 1))
+
+        # Update token position
+        for token in bmap.tokens:
             if token.id == self._dragging:
                 token.grid_x = gx
                 token.grid_y = gy
@@ -1829,6 +1858,7 @@ class DnDSoundboard(TkinterDnD.Tk if HAS_DND else tk.Tk):
         # Extra guard: control characters (e.g. Ctrl+V sends ) can appear
         # with unreliable state flags after focus/minimize changes on some systems.
         if event.char and ord(event.char) < 32:
+        # Do not consume standard shortcuts like Ctrl+V/C/X, Alt+*, Cmd+*.
             return
 
         w = event.widget
