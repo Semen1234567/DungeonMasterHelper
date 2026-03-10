@@ -136,12 +136,16 @@ TOKEN_ICONS = {
 
 class MapToken:
     __slots__ = ("id", "name", "token_type", "grid_x", "grid_y",
-                 "color", "label")
+                 "color", "label", "character_id", "max_hp", "current_hp",
+                 "initiative", "is_down", "death_success", "death_fail")
 
     def __init__(self, id: str = "", name: str = "",
                  token_type: str = "player",
                  grid_x: int = 0, grid_y: int = 0,
-                 color: str = "", label: str = ""):
+                 color: str = "", label: str = "",
+                 character_id: str = "", max_hp: int = 1, current_hp: int | None = None,
+                 initiative: int = 0, is_down: bool = False,
+                 death_success: int = 0, death_fail: int = 0):
         self.id = id or str(uuid.uuid4())[:8]
         self.name = name
         self.token_type = token_type if token_type in VALID_TOKEN_TYPES else "player"
@@ -149,6 +153,15 @@ class MapToken:
         self.grid_y = grid_y
         self.color = color or TOKEN_COLORS.get(token_type, "#cdd6f4")
         self.label = label or (name[:2].upper() if name else "??")
+        self.character_id = character_id
+        self.max_hp = max(1, int(max_hp or 1))
+        if current_hp is None:
+            current_hp = self.max_hp
+        self.current_hp = int(max(0, min(self.max_hp, current_hp)))
+        self.initiative = int(initiative or 0)
+        self.is_down = bool(is_down)
+        self.death_success = max(0, min(3, int(death_success or 0)))
+        self.death_fail = max(0, min(3, int(death_fail or 0)))
 
     def to_dict(self) -> dict:
         return {
@@ -156,6 +169,13 @@ class MapToken:
             "token_type": self.token_type,
             "grid_x": self.grid_x, "grid_y": self.grid_y,
             "color": self.color, "label": self.label,
+            "character_id": self.character_id,
+            "max_hp": self.max_hp,
+            "current_hp": self.current_hp,
+            "initiative": self.initiative,
+            "is_down": self.is_down,
+            "death_success": self.death_success,
+            "death_fail": self.death_fail,
         }
 
     @classmethod
@@ -168,6 +188,13 @@ class MapToken:
             grid_y=d.get("grid_y", 0),
             color=d.get("color", ""),
             label=d.get("label", ""),
+            character_id=d.get("character_id", ""),
+            max_hp=d.get("max_hp", 1),
+            current_hp=d.get("current_hp", None),
+            initiative=d.get("initiative", 0),
+            is_down=d.get("is_down", False),
+            death_success=d.get("death_success", 0),
+            death_fail=d.get("death_fail", 0),
         )
 
 

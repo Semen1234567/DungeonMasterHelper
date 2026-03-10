@@ -3,17 +3,17 @@ audio_engine.py  --  D&D Soundboard audio core
 ================================================
 Uses pygame-ce mixer for multi-channel playback.
 
-Three logical layers:
-  Channel 0  ->  Ambient       (looping background music)
-  Channel 1  ->  Stinger       (one-shot: fades ambient OUT, plays alone,
-                                 then fades ambient back IN)
-  Channel 2+ ->  Fast Stinger  (instant one-shot, no fade, plays over everything)
+Logical layers:
+  Channel 0    -> Ambient main
+  Channels 1-2 -> Stinger pair (allows stinger-to-stinger crossfades)
+  Channel 3    -> Transition helper (ambient crossfade overlap)
+  Channel 4+   -> Fast stingers
 
-Stinger behaviour:
-  1. Ambient fades out to SILENCE  (not ducking — full mute)
-  2. Stinger fades in and plays on its own
-  3. When stinger ends, it fades out
-  4. Ambient fades back in to its previous volume
+Transition behaviour:
+  - Ambient <-> Ambient: overlap during crossfade.
+  - Ambient -> Stinger: ambient fades out while stinger fades in.
+  - Stinger -> Stinger: outgoing stinger fades out while next fades in.
+  - After stinger end/cancel, ambient fades back to target volume.
 
 All fades run in background threads so the GUI stays responsive.
 """
@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 SAMPLE_RATE = 44100
 CHANNELS = 2
 BUFFER = 2048
-FAST_STINGER_CHANNELS = 4  # channels 2..5 for overlapping fast stingers
+FAST_STINGER_CHANNELS = 4  # channels 4..7 for overlapping fast stingers
 
 
 class MusicEngine:
@@ -65,13 +65,15 @@ class MusicEngine:
     def __init__(self):
         pygame.mixer.pre_init(SAMPLE_RATE, -16, CHANNELS, BUFFER)
         pygame.mixer.init()
-        total_ch = 2 + FAST_STINGER_CHANNELS
+        total_ch = 4 + FAST_STINGER_CHANNELS
         pygame.mixer.set_num_channels(total_ch)
 
         self._ch_ambient = pygame.mixer.Channel(0)
-        self._ch_stinger = pygame.mixer.Channel(1)
+        self._stinger_channels = [pygame.mixer.Channel(1), pygame.mixer.Channel(2)]
+        self._stinger_idx = 0
+        self._ch_transition = pygame.mixer.Channel(3)
         self._fast_channels = [pygame.mixer.Channel(i)
-                               for i in range(2, 2 + FAST_STINGER_CHANNELS)]
+                               for i in range(4, 4 + FAST_STINGER_CHANNELS)]
         self._fast_idx = 0
 
         self._sounds: dict[str, pygame.mixer.Sound] = {}
@@ -93,6 +95,7 @@ class MusicEngine:
         self._lock = threading.Lock()
         self._stinger_busy = False
         self._stinger_cancel = threading.Event()
+        self._pending_stinger: pygame.mixer.Sound | None = None
 
         logger.info("MusicEngine ready  (pygame-ce %s)", pygame.version.ver)
 
@@ -165,17 +168,40 @@ class MusicEngine:
         if snd is None:
             logger.warning("Sound '%s' not loaded", name)
             return
+
+        # Avoid restarting the same ambient when user clicks it again.
+        if self._current_ambient == name and self._ch_ambient.get_busy():
+            return
+
+        prev_snd = self._current_ambient_snd
         self._current_ambient = name
         self._current_ambient_snd = snd
         threading.Thread(target=self._do_crossfade_ambient,
-                         args=(snd,), daemon=True).start()
+                         args=(snd, prev_snd), daemon=True).start()
 
-    def _do_crossfade_ambient(self, snd: pygame.mixer.Sound):
+    def _do_crossfade_ambient(self, snd: pygame.mixer.Sound,
+                              prev_snd: pygame.mixer.Sound | None = None):
         fade = self._ambient_crossfade
-        if self._ch_ambient.get_busy():
-            self._ramp(self._ch_ambient, self._ch_ambient.get_volume(),
-                       0.0, fade)
-            self._ch_ambient.stop()
+
+        # Fade out currently playing stinger layers while fading ambient in.
+        self._stinger_cancel.set()
+        for ch in self._stinger_channels:
+            if ch.get_busy():
+                ch.fadeout(max(100, min(fade, self._stinger_fade_out)))
+
+        # Ambient -> Ambient overlap: replay current ambient on transition channel
+        # and fade it out while the new ambient fades in.
+        if self._ch_ambient.get_busy() and prev_snd is not None:
+            prev_vol = self._ch_ambient.get_volume()
+            if prev_vol > 0.0:
+                self._ch_transition.stop()
+                self._ch_transition.set_volume(prev_vol)
+                self._ch_transition.play(prev_snd, loops=-1)
+                threading.Thread(target=self._ramp,
+                                 args=(self._ch_transition, prev_vol, 0.0, fade),
+                                 daemon=True).start()
+
+        self._ch_ambient.stop()
         self._ch_ambient.set_volume(0.0)
         self._ch_ambient.play(snd, loops=-1)
         self._ramp(self._ch_ambient, 0.0, self._vol_ambient, fade)
@@ -188,70 +214,114 @@ class MusicEngine:
         if snd is None:
             logger.warning("Sound '%s' not loaded", name)
             return
-        if self._stinger_busy:
-            logger.info("Stinger already playing, skipping")
-            return
-        self._stinger_cancel.clear()
-        threading.Thread(target=self._do_stinger,
-                         args=(snd,), daemon=True).start()
+
+        start_worker = False
+        with self._lock:
+            # Keep only the latest requested stinger to allow quick switching.
+            self._pending_stinger = snd
+            if self._stinger_busy:
+                # Request transition to latest stinger; running worker will switch.
+                self._stinger_cancel.set()
+                return
+            self._stinger_busy = True
+            start_worker = True
+
+        if start_worker:
+            threading.Thread(target=self._stinger_worker, daemon=True).start()
+
+    def _stinger_worker(self):
+        try:
+            while True:
+                with self._lock:
+                    snd = self._pending_stinger
+                    self._pending_stinger = None
+
+                if snd is None:
+                    return
+
+                self._stinger_cancel.clear()
+                self._do_stinger(snd)
+        finally:
+            with self._lock:
+                self._stinger_busy = False
+
+    def _has_pending_stinger(self) -> bool:
+        with self._lock:
+            return self._pending_stinger is not None
 
     def _do_stinger(self, snd: pygame.mixer.Sound):
-        self._stinger_busy = True
-        try:
-            duration = snd.get_length()
-            had_ambient = self._ch_ambient.get_busy()
+        duration = snd.get_length()
 
-            # 1) Fade ambient to SILENCE
-            if had_ambient:
-                self._ramp(self._ch_ambient, self._ch_ambient.get_volume(),
-                           0.0, self._ambient_duck_out)
-                self._ch_ambient.set_volume(0.0)
+        in_ch = self._stinger_channels[self._stinger_idx % len(self._stinger_channels)]
+        out_ch = self._stinger_channels[(self._stinger_idx + 1) % len(self._stinger_channels)]
+        self._stinger_idx += 1
 
-            if self._stinger_cancel.is_set():
-                self._restore_ambient()
+        # Ambient -> Stinger overlap
+        if self._ch_ambient.get_busy() and self._ch_ambient.get_volume() > 0.0:
+            threading.Thread(target=self._ramp,
+                             args=(self._ch_ambient, self._ch_ambient.get_volume(), 0.0,
+                                   self._ambient_duck_out),
+                             daemon=True).start()
+
+        # Stinger -> Stinger overlap
+        if out_ch.get_busy() and out_ch.get_volume() > 0.0:
+            threading.Thread(target=self._ramp,
+                             args=(out_ch, out_ch.get_volume(), 0.0,
+                                   self._stinger_fade_out),
+                             daemon=True).start()
+            out_ch.fadeout(max(100, self._stinger_fade_out))
+
+        # Fade incoming stinger in
+        in_ch.stop()
+        in_ch.set_volume(0.0)
+        in_ch.play(snd, loops=0)
+        self._ramp(in_ch, 0.0, self._vol_stinger, self._stinger_fade_in)
+
+        if self._stinger_cancel.is_set():
+            # If a new stinger is queued, let next cycle crossfade from this one.
+            if self._has_pending_stinger():
                 return
+            in_ch.fadeout(500)
+            threading.Thread(target=self._restore_after_stinger_stop,
+                             args=(500,), daemon=True).start()
+            return
 
-            # 2) Fade stinger in
-            self._ch_stinger.set_volume(0.0)
-            self._ch_stinger.play(snd, loops=0)
-            self._ramp(self._ch_stinger, 0.0, self._vol_stinger,
-                       self._stinger_fade_in)
-
+        # Wait most of stinger duration
+        wait = max(0.0, duration - self._stinger_fade_out / 1000.0)
+        elapsed = 0.0
+        while elapsed < wait:
             if self._stinger_cancel.is_set():
-                self._ch_stinger.fadeout(500)
-                time.sleep(0.5)
-                self._restore_ambient()
-                return
-
-            # 3) Wait for stinger to finish (minus fade-out window)
-            wait = max(0.0, duration - self._stinger_fade_out / 1000.0)
-            elapsed = 0.0
-            while elapsed < wait:
-                if self._stinger_cancel.is_set():
-                    self._ch_stinger.fadeout(500)
-                    time.sleep(0.5)
-                    self._restore_ambient()
+                if self._has_pending_stinger():
                     return
-                step = min(0.1, wait - elapsed)
-                time.sleep(step)
-                elapsed += step
+                in_ch.fadeout(500)
+                threading.Thread(target=self._restore_after_stinger_stop,
+                                 args=(500,), daemon=True).start()
+                return
+            step = min(0.1, wait - elapsed)
+            time.sleep(step)
+            elapsed += step
 
-            # 4) Fade stinger out
-            self._ramp(self._ch_stinger, self._ch_stinger.get_volume(),
-                       0.0, self._stinger_fade_out)
-            self._ch_stinger.stop()
+        # Fade current stinger out
+        self._ramp(in_ch, in_ch.get_volume(), 0.0, self._stinger_fade_out)
+        in_ch.stop()
 
-            # 5) Restore ambient
-            self._restore_ambient()
+        self._restore_ambient()
 
-        finally:
-            self._stinger_busy = False
+    def _restore_after_stinger_stop(self, fade_ms: int):
+        time.sleep(max(0.0, fade_ms) / 1000.0)
+        # Wait briefly for channels to actually report idle after fadeout.
+        deadline = time.time() + 1.5
+        while any(ch.get_busy() for ch in self._stinger_channels) and time.time() < deadline:
+            time.sleep(0.05)
+        self._restore_ambient()
 
     def _restore_ambient(self):
-        """Fade ambient back to its normal volume."""
+        """Fade ambient back to its normal volume when no stinger remains."""
+        if any(ch.get_busy() for ch in self._stinger_channels):
+            return
         fade = self._ambient_restore_in
         if self._ch_ambient.get_busy():
-            self._ramp(self._ch_ambient, 0.0, self._vol_ambient, fade)
+            self._ramp(self._ch_ambient, self._ch_ambient.get_volume(), self._vol_ambient, fade)
         elif self._current_ambient_snd is not None:
             self._ch_ambient.set_volume(0.0)
             self._ch_ambient.play(self._current_ambient_snd, loops=-1)
@@ -281,8 +351,9 @@ class MusicEngine:
 
     def set_stinger_volume(self, vol: float) -> None:
         self._vol_stinger = max(0.0, min(1.0, vol))
-        if self._ch_stinger.get_busy():
-            self._ch_stinger.set_volume(self._vol_stinger)
+        for ch in self._stinger_channels:
+            if ch.get_busy():
+                ch.set_volume(self._vol_stinger)
 
     def set_fast_stinger_volume(self, vol: float) -> None:
         self._vol_fast = max(0.0, min(1.0, vol))
@@ -295,7 +366,9 @@ class MusicEngine:
         fade = self._stop_fade
         self._stinger_cancel.set()
         self._ch_ambient.fadeout(fade)
-        self._ch_stinger.fadeout(fade)
+        self._ch_transition.fadeout(fade)
+        for ch in self._stinger_channels:
+            ch.fadeout(fade)
         for ch in self._fast_channels:
             ch.stop()
         self._current_ambient = None
@@ -309,10 +382,13 @@ class MusicEngine:
 
     def stop_stinger(self) -> None:
         """Stop stinger early and restore ambient."""
-        if self._stinger_busy:
-            self._stinger_cancel.set()
-        else:
-            self._ch_stinger.fadeout(self._stop_fade)
+        with self._lock:
+            self._pending_stinger = None
+        self._stinger_cancel.set()
+        for ch in self._stinger_channels:
+            ch.fadeout(self._stop_fade)
+        threading.Thread(target=self._restore_after_stinger_stop,
+                         args=(self._stop_fade,), daemon=True).start()
 
     def get_current_ambient(self) -> str | None:
         return self._current_ambient
