@@ -1,11 +1,10 @@
 import os
-import sys
 import logging
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, simpledialog
 
 from audio_engine import MusicEngine
-from library import Library, Track
+from library import Library
 from campaign import (CampaignManager, Campaign, Character, DEFAULT_STATS,
                       BattleMap, MapToken, TOKEN_COLORS, TOKEN_ICONS,
                       VALID_TOKEN_TYPES)
