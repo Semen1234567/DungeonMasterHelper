@@ -26,6 +26,7 @@ from library import Library, Track
 from campaign import (CampaignManager, Campaign, Character, DEFAULT_STATS,
                       BattleMap, MapToken, TOKEN_COLORS, TOKEN_ICONS,
                       VALID_TOKEN_TYPES)
+from combat_utils import hp_from_stats, initiative_from_dex
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -400,7 +401,7 @@ class TrackList(tk.Frame):
         track = self._lib.add_track(path, name, self._category,
                                     self._kind, hotkey=hotkey)
         try:
-            self._engine.load_track(track.name, track.path)
+            self._engine.load_track(track.name, self._lib.track_path(track))
         except Exception as ex:
             logger.warning("Could not load '%s': %s", name, ex)
         self._refresh()
@@ -995,26 +996,29 @@ class SoundboardTab(tk.Frame):
 # Battle Map Tab
 # ======================================================================
 class BattleMapTab(tk.Frame):
-    """Interactive battle map with grid overlay and draggable tokens."""
+    """Interactive battle map with exploration/combat modes."""
 
     def __init__(self, parent, campaign_mgr, campaign_id):
         super().__init__(parent, bg=C["bg"])
         self._cm = campaign_mgr
         self._cid = campaign_id
-        self._current_map = None  # type: BattleMap | None
-        self._bg_image = None     # PIL Image
-        self._bg_photo = None     # ImageTk.PhotoImage
-        self._dragging = None     # (token_id, offset_x, offset_y)
+        self._current_map = None
+        self._bg_image = None
+        self._bg_photo = None
+        self._dragging = None
         self._zoom = 1.0
 
-        # --- Top toolbar ---
+        self._combat_mode = False
+        self._turn_order = []
+        self._turn_index = 0
+        self._characters = []
+
         toolbar = tk.Frame(self, bg=C["bg"])
         toolbar.pack(fill="x", padx=10, pady=(8, 4))
 
         tk.Label(toolbar, text="BATTLE MAP", bg=C["bg"], fg=C["accent"],
                  font=FONT_TITLE).pack(side="left")
 
-        # Map selector
         self._map_var = tk.StringVar(value="-- select map --")
         self._map_combo = ttk.Combobox(toolbar, textvariable=self._map_var,
                                        state="readonly", width=25)
@@ -1024,52 +1028,34 @@ class BattleMapTab(tk.Frame):
         make_button(toolbar, "+ New Map", self._new_map,
                     bg=C["accent"], fg=C["bg"],
                     font=FONT_SMALL, padx=8, pady=2).pack(side="left", padx=4)
-
         make_button(toolbar, "Delete Map", self._delete_map,
                     bg=C["stop_bg"], fg=C["stop_fg"],
                     font=FONT_SMALL, padx=8, pady=2).pack(side="left", padx=4)
 
-        # Grid settings
         tk.Label(toolbar, text="Grid:", bg=C["bg"], fg=C["fg_dim"],
                  font=FONT_SMALL).pack(side="left", padx=(16, 4))
-
         self._rows_var = tk.StringVar(value="20")
         self._cols_var = tk.StringVar(value="20")
 
-        tk.Label(toolbar, text="R:", bg=C["bg"], fg=C["fg_dim"],
-                 font=FONT_TINY).pack(side="left")
-        rows_entry = tk.Entry(toolbar, textvariable=self._rows_var,
-                              bg=C["bg_entry"], fg=C["fg"],
-                              insertbackground=C["fg"], font=FONT_SMALL,
-                              width=4, bd=1, relief="solid")
+        tk.Label(toolbar, text="R:", bg=C["bg"], fg=C["fg_dim"], font=FONT_TINY).pack(side="left")
+        rows_entry = tk.Entry(toolbar, textvariable=self._rows_var, bg=C["bg_entry"], fg=C["fg"],
+                              insertbackground=C["fg"], font=FONT_SMALL, width=4, bd=1, relief="solid")
         rows_entry.pack(side="left", padx=(2, 4))
         rows_entry.bind("<Return>", lambda e: self._apply_grid())
 
-        tk.Label(toolbar, text="C:", bg=C["bg"], fg=C["fg_dim"],
-                 font=FONT_TINY).pack(side="left")
-        cols_entry = tk.Entry(toolbar, textvariable=self._cols_var,
-                              bg=C["bg_entry"], fg=C["fg"],
-                              insertbackground=C["fg"], font=FONT_SMALL,
-                              width=4, bd=1, relief="solid")
+        tk.Label(toolbar, text="C:", bg=C["bg"], fg=C["fg_dim"], font=FONT_TINY).pack(side="left")
+        cols_entry = tk.Entry(toolbar, textvariable=self._cols_var, bg=C["bg_entry"], fg=C["fg"],
+                              insertbackground=C["fg"], font=FONT_SMALL, width=4, bd=1, relief="solid")
         cols_entry.pack(side="left", padx=(2, 4))
         cols_entry.bind("<Return>", lambda e: self._apply_grid())
 
         make_button(toolbar, "Apply Grid", self._apply_grid,
                     font=FONT_SMALL, padx=6, pady=2).pack(side="left", padx=4)
 
-        # Token buttons
-        tk.Label(toolbar, text="|", bg=C["bg"], fg=C["border"],
-                 font=FONT).pack(side="left", padx=4)
-
-        make_button(toolbar, "+ Player", lambda: self._add_token("player"),
-                    bg=C["accent3"], fg=C["bg"],
-                    font=FONT_SMALL, padx=6, pady=2).pack(side="left", padx=2)
-        make_button(toolbar, "+ NPC", lambda: self._add_token("npc"),
-                    bg=C["blue"], fg=C["bg"],
-                    font=FONT_SMALL, padx=6, pady=2).pack(side="left", padx=2)
-        make_button(toolbar, "+ Enemy", lambda: self._add_token("enemy"),
-                    bg=C["accent2"], fg=C["bg"],
-                    font=FONT_SMALL, padx=6, pady=2).pack(side="left", padx=2)
+        self._mode_btn = make_button(toolbar, "Enter Combat", self._toggle_mode,
+                                     bg=C["accent2"], fg=C["bg"],
+                                     font=FONT_SMALL, padx=8, pady=2)
+        self._mode_btn.pack(side="left", padx=8)
 
         make_button(toolbar, "Save", self._save_map,
                     bg=C["accent"], fg=C["bg"],
@@ -1077,87 +1063,107 @@ class BattleMapTab(tk.Frame):
 
         tk.Frame(self, bg=C["border"], height=1).pack(fill="x", padx=10)
 
-        # --- Canvas area ---
-        canvas_frame = tk.Frame(self, bg=C["bg_panel"])
-        canvas_frame.pack(fill="both", expand=True, padx=10, pady=8)
+        body = tk.Frame(self, bg=C["bg_panel"])
+        body.pack(fill="both", expand=True, padx=10, pady=8)
+        body.columnconfigure(0, weight=1)
+        body.columnconfigure(1, weight=0)
+        body.rowconfigure(0, weight=1)
 
-        self._canvas = tk.Canvas(canvas_frame, bg="#2a2a3a",
-                                 highlightthickness=0, cursor="crosshair")
-        self._h_scroll = ttk.Scrollbar(canvas_frame, orient="horizontal",
-                                       command=self._canvas.xview)
-        self._v_scroll = ttk.Scrollbar(canvas_frame, orient="vertical",
-                                       command=self._canvas.yview)
-        self._canvas.configure(xscrollcommand=self._h_scroll.set,
-                               yscrollcommand=self._v_scroll.set)
+        canvas_frame = tk.Frame(body, bg=C["bg_panel"])
+        canvas_frame.grid(row=0, column=0, sticky="nsew")
 
+        self._canvas = tk.Canvas(canvas_frame, bg="#2a2a3a", highlightthickness=0, cursor="crosshair")
+        self._h_scroll = ttk.Scrollbar(canvas_frame, orient="horizontal", command=self._canvas.xview)
+        self._v_scroll = ttk.Scrollbar(canvas_frame, orient="vertical", command=self._canvas.yview)
+        self._canvas.configure(xscrollcommand=self._h_scroll.set, yscrollcommand=self._v_scroll.set)
         self._canvas.grid(row=0, column=0, sticky="nsew")
         self._v_scroll.grid(row=0, column=1, sticky="ns")
         self._h_scroll.grid(row=1, column=0, sticky="ew")
         canvas_frame.rowconfigure(0, weight=1)
         canvas_frame.columnconfigure(0, weight=1)
 
-        # Canvas events
         self._canvas.bind("<ButtonPress-1>", self._on_press)
         self._canvas.bind("<B1-Motion>", self._on_drag)
         self._canvas.bind("<ButtonRelease-1>", self._on_release)
         self._canvas.bind("<Button-3>", self._on_right_click)
         self._canvas.bind("<MouseWheel>", self._on_mousewheel)
 
-        # Info label
-        self._info_var = tk.StringVar(value="No map loaded. Create or select a map.")
-        tk.Label(self, textvariable=self._info_var, bg=C["bg"],
-                 fg=C["fg_dim"], font=FONT_SMALL).pack(padx=10, pady=(0, 4))
+        side = tk.Frame(body, bg=C["bg_card"], width=230)
+        side.grid(row=0, column=1, sticky="ns", padx=(8, 0))
+        side.grid_propagate(False)
 
-        # Load maps list
+        tk.Label(side, text="Characters", bg=C["bg_card"], fg=C["accent"], font=FONT_BOLD).pack(anchor="w", padx=8, pady=(8, 2))
+        self._char_list = tk.Listbox(side, bg=C["bg_panel"], fg=C["fg"], selectbackground=C["btn_hover"],
+                                     height=10, relief="flat")
+        self._char_list.pack(fill="x", padx=8)
+        make_button(side, "Place Selected", self._add_selected_character_token,
+                    font=FONT_SMALL, padx=6, pady=2).pack(anchor="w", padx=8, pady=4)
+
+        tk.Frame(side, bg=C["border"], height=1).pack(fill="x", padx=8, pady=4)
+        tk.Label(side, text="Combat", bg=C["bg_card"], fg=C["accent"], font=FONT_BOLD).pack(anchor="w", padx=8)
+        self._turn_var = tk.StringVar(value="Turn: -")
+        tk.Label(side, textvariable=self._turn_var, bg=C["bg_card"], fg=C["fg"],
+                 font=FONT_SMALL, justify="left", wraplength=200).pack(anchor="w", padx=8, pady=(2, 2))
+        make_button(side, "Next Turn", self._next_turn,
+                    font=FONT_SMALL, padx=6, pady=2).pack(anchor="w", padx=8, pady=2)
+        make_button(side, "Roll Initiative", self._roll_initiative,
+                    font=FONT_SMALL, padx=6, pady=2).pack(anchor="w", padx=8, pady=2)
+
+        self._info_var = tk.StringVar(value="No map loaded. Create or select a map.")
+        tk.Label(self, textvariable=self._info_var, bg=C["bg"], fg=C["fg_dim"],
+                 font=FONT_SMALL).pack(padx=10, pady=(0, 4))
+
+        self._refresh_characters_list()
         self._refresh_map_list()
 
-    # ------------------------------------------------------------------
-    # Map list management
-    # ------------------------------------------------------------------
+    def _refresh_characters_list(self):
+        self._characters = self._cm.list_characters(self._cid)
+        self._char_list.delete(0, tk.END)
+        for c in self._characters:
+            self._char_list.insert(tk.END, f"[{c.char_type}] {c.name}")
+
+    def _toggle_mode(self):
+        self._combat_mode = not self._combat_mode
+        if self._combat_mode:
+            self._mode_btn.configure(text="Exit Combat", bg=C["accent3"])
+            self._roll_initiative()
+        else:
+            self._mode_btn.configure(text="Enter Combat", bg=C["accent2"])
+            self._turn_order = []
+            self._turn_index = 0
+            self._turn_var.set("Turn: -")
+        self._redraw()
+
     def _refresh_map_list(self):
         maps = self._cm.load_maps(self._cid)
         names = [m.name for m in maps]
         self._map_combo["values"] = names
-        if self._current_map:
-            if self._current_map.name in names:
-                self._map_var.set(self._current_map.name)
-            else:
-                self._current_map = None
-                self._map_var.set("-- select map --")
+        if self._current_map and self._current_map.name not in names:
+            self._current_map = None
+            self._map_var.set("-- select map --")
 
     def _on_map_selected(self, event=None):
         name = self._map_var.get()
-        maps = self._cm.load_maps(self._cid)
-        for m in maps:
+        for m in self._cm.load_maps(self._cid):
             if m.name == name:
                 self._current_map = m
                 self._rows_var.set(str(m.grid_rows))
                 self._cols_var.set(str(m.grid_cols))
                 self._load_map_image()
+                self._refresh_characters_list()
                 self._redraw()
                 return
 
     def _new_map(self):
-        name = simpledialog.askstring("New Map", "Map name:",
-                                      parent=self.winfo_toplevel())
+        name = simpledialog.askstring("New Map", "Map name:", parent=self.winfo_toplevel())
         if not name or not name.strip():
             return
-
-        path = filedialog.askopenfilename(
-            title="Select map image",
-            filetypes=[("Images", " ".join(f"*{e}" for e in IMAGE_EXTS))])
+        path = filedialog.askopenfilename(title="Select map image",
+                                          filetypes=[("Images", " ".join(f"*{e}" for e in IMAGE_EXTS))])
         if not path:
             return
-
-        try:
-            rows = int(self._rows_var.get())
-        except ValueError:
-            rows = 20
-        try:
-            cols = int(self._cols_var.get())
-        except ValueError:
-            cols = 20
-
+        rows = int(self._rows_var.get() or 20)
+        cols = int(self._cols_var.get() or 20)
         bmap = self._cm.add_map(self._cid, name.strip(), path, rows, cols)
         self._current_map = bmap
         self._refresh_map_list()
@@ -1168,9 +1174,7 @@ class BattleMapTab(tk.Frame):
     def _delete_map(self):
         if not self._current_map:
             return
-        if messagebox.askyesno("Confirm",
-                               f"Delete map '{self._current_map.name}'?",
-                               parent=self.winfo_toplevel()):
+        if messagebox.askyesno("Confirm", f"Delete map '{self._current_map.name}'?", parent=self.winfo_toplevel()):
             self._cm.remove_map(self._cid, self._current_map.id)
             self._current_map = None
             self._bg_image = None
@@ -1181,14 +1185,10 @@ class BattleMapTab(tk.Frame):
             self._info_var.set("Map deleted.")
 
     def _save_map(self):
-        if not self._current_map:
-            return
-        self._cm.update_map(self._cid, self._current_map)
-        self._info_var.set(f"Map '{self._current_map.name}' saved.")
+        if self._current_map:
+            self._cm.update_map(self._cid, self._current_map)
+            self._info_var.set(f"Map '{self._current_map.name}' saved.")
 
-    # ------------------------------------------------------------------
-    # Image loading
-    # ------------------------------------------------------------------
     def _load_map_image(self):
         if not self._current_map or not HAS_PIL:
             self._bg_image = None
@@ -1209,9 +1209,6 @@ class BattleMapTab(tk.Frame):
             logger.error("Failed to load map image: %s", ex)
             self._bg_image = None
 
-    # ------------------------------------------------------------------
-    # Grid settings
-    # ------------------------------------------------------------------
     def _apply_grid(self):
         if not self._current_map:
             return
@@ -1225,173 +1222,151 @@ class BattleMapTab(tk.Frame):
         self._cm.update_map(self._cid, self._current_map)
         self._redraw()
 
-    # ------------------------------------------------------------------
-    # Drawing
-    # ------------------------------------------------------------------
-    def _redraw(self):
-        self._canvas.delete("all")
+    def _add_selected_character_token(self):
         if not self._current_map:
             return
-
-        bmap = self._current_map
-        rows, cols = bmap.grid_rows, bmap.grid_cols
-
-        # Determine canvas size from image or default
-        if self._bg_image and HAS_PIL:
-            img_w, img_h = self._bg_image.width, self._bg_image.height
-            # Scale image to fit zoom
-            scaled_w = int(img_w * self._zoom)
-            scaled_h = int(img_h * self._zoom)
-            resized = self._bg_image.resize((scaled_w, scaled_h), Image.LANCZOS)
-            self._bg_photo = ImageTk.PhotoImage(resized)
-            self._canvas.create_image(0, 0, anchor="nw", image=self._bg_photo,
-                                      tags="bg")
-            canvas_w, canvas_h = scaled_w, scaled_h
-        else:
-            canvas_w = cols * 40
-            canvas_h = rows * 40
-            self._canvas.create_rectangle(0, 0, canvas_w, canvas_h,
-                                          fill="#2a2a3a", outline="", tags="bg")
-
-        self._canvas.configure(scrollregion=(0, 0, canvas_w, canvas_h))
-
-        # Cell size
-        cell_w = canvas_w / cols
-        cell_h = canvas_h / rows
-
-        # Draw grid lines
-        for r in range(rows + 1):
-            y = r * cell_h
-            self._canvas.create_line(0, y, canvas_w, y,
-                                     fill="#ffffff", stipple="gray25",
-                                     tags="grid")
-        for c in range(cols + 1):
-            x = c * cell_w
-            self._canvas.create_line(x, 0, x, canvas_h,
-                                     fill="#ffffff", stipple="gray25",
-                                     tags="grid")
-
-        # Draw tokens
-        for token in bmap.tokens:
-            self._draw_token(token, cell_w, cell_h)
-
-    def _draw_token(self, token, cell_w, cell_h):
-        cx = token.grid_x * cell_w + cell_w / 2
-        cy = token.grid_y * cell_h + cell_h / 2
-        radius = min(cell_w, cell_h) * 0.4
-
-        # Circle
-        self._canvas.create_oval(
-            cx - radius, cy - radius, cx + radius, cy + radius,
-            fill=token.color, outline=C["token_outline"], width=2,
-            tags=(f"token_{token.id}", "token"))
-
-        # Label text
-        self._canvas.create_text(
-            cx, cy, text=token.label, fill=C["bg"],
-            font=("Segoe UI", max(8, int(radius * 0.7)), "bold"),
-            tags=(f"token_{token.id}", "token"))
-
-        # Name tooltip above
-        self._canvas.create_text(
-            cx, cy - radius - 6, text=token.name,
-            fill=C["fg"], font=FONT_TINY,
-            tags=(f"token_{token.id}", "token"))
-
-    # ------------------------------------------------------------------
-    # Token management
-    # ------------------------------------------------------------------
-    def _add_token(self, token_type):
-        if not self._current_map:
-            messagebox.showinfo("Info", "Load a map first.", parent=self.winfo_toplevel())
+        sel = self._char_list.curselection()
+        if not sel:
             return
-        name = simpledialog.askstring(
-            "New Token",
-            f"Name for {token_type}:",
-            parent=self.winfo_toplevel())
-        if not name or not name.strip():
-            return
-        name = name.strip()
-        label = simpledialog.askstring(
-            "Token Label",
-            f"Short label (1-3 chars, e.g. initials):",
-            initialvalue=name[:2].upper(),
-            parent=self.winfo_toplevel())
-        if not label:
-            label = name[:2].upper()
-
-        token = MapToken(name=name, token_type=token_type,
-                         grid_x=0, grid_y=0, label=label[:3].upper())
+        char = self._characters[sel[0]]
+        hp = hp_from_stats(char.stats, 10)
+        token = MapToken(name=char.name, token_type=char.char_type,
+                         grid_x=0, grid_y=0, label=char.name[:2].upper(),
+                         character_id=char.id, max_hp=hp, current_hp=hp)
         self._current_map.add_token(token)
         self._cm.update_map(self._cid, self._current_map)
         self._redraw()
 
+    def _roll_initiative(self):
+        if not self._current_map:
+            return
+        char_by_id = {c.id: c for c in self._characters}
+        for token in self._current_map.tokens:
+            dex = 10
+            if token.character_id in char_by_id:
+                dex = int(char_by_id[token.character_id].stats.get("dex", 10) or 10)
+            token.initiative = initiative_from_dex(dex)
+        self._turn_order = [t.id for t in sorted(self._current_map.tokens,
+                                                 key=lambda t: t.initiative,
+                                                 reverse=True)]
+        self._turn_index = 0
+        self._update_turn_label()
+        self._cm.update_map(self._cid, self._current_map)
+        self._redraw()
+
+    def _next_turn(self):
+        if not self._turn_order:
+            self._roll_initiative()
+            return
+        self._turn_index = (self._turn_index + 1) % len(self._turn_order)
+        self._update_turn_label()
+        self._redraw()
+
+    def _update_turn_label(self):
+        if not self._turn_order or not self._current_map:
+            self._turn_var.set("Turn: -")
+            return
+        tid = self._turn_order[self._turn_index]
+        token = next((t for t in self._current_map.tokens if t.id == tid), None)
+        if token:
+            self._turn_var.set(f"Turn: {token.name} (Init {token.initiative})")
+
+    def _redraw(self):
+        self._canvas.delete("all")
+        if not self._current_map:
+            return
+        bmap = self._current_map
+        rows, cols = bmap.grid_rows, bmap.grid_cols
+        if self._bg_image and HAS_PIL:
+            img_w, img_h = self._bg_image.width, self._bg_image.height
+            scaled_w = int(img_w * self._zoom)
+            scaled_h = int(img_h * self._zoom)
+            resized = self._bg_image.resize((scaled_w, scaled_h), Image.LANCZOS)
+            self._bg_photo = ImageTk.PhotoImage(resized)
+            self._canvas.create_image(0, 0, anchor="nw", image=self._bg_photo, tags="bg")
+            canvas_w, canvas_h = scaled_w, scaled_h
+        else:
+            canvas_w = cols * 40
+            canvas_h = rows * 40
+            self._canvas.create_rectangle(0, 0, canvas_w, canvas_h, fill="#2a2a3a", outline="", tags="bg")
+
+        self._canvas.configure(scrollregion=(0, 0, canvas_w, canvas_h))
+        x_lines = [round(c * canvas_w / cols) for c in range(cols + 1)]
+        y_lines = [round(r * canvas_h / rows) for r in range(rows + 1)]
+        for y in y_lines:
+            self._canvas.create_line(0, y, canvas_w, y, fill="#ffffff", width=1, tags="grid")
+        for x in x_lines:
+            self._canvas.create_line(x, 0, x, canvas_h, fill="#ffffff", width=1, tags="grid")
+
+        current_id = self._turn_order[self._turn_index] if self._turn_order else None
+        for token in bmap.tokens:
+            self._draw_token(token, canvas_w, canvas_h, rows, cols, token.id == current_id)
+
+    def _draw_token(self, token, canvas_w, canvas_h, rows, cols, is_current=False):
+        left = round(token.grid_x * canvas_w / cols)
+        right = round((token.grid_x + 1) * canvas_w / cols)
+        top = round(token.grid_y * canvas_h / rows)
+        bottom = round((token.grid_y + 1) * canvas_h / rows)
+        cx = (left + right) / 2
+        cy = (top + bottom) / 2
+        radius = min(right - left, bottom - top) * 0.4
+
+        outline = C["amber"] if is_current else C["token_outline"]
+        self._canvas.create_oval(cx - radius, cy - radius, cx + radius, cy + radius,
+                                 fill=token.color, outline=outline, width=3 if is_current else 2,
+                                 tags=(f"token_{token.id}", "token"))
+        self._canvas.create_text(cx, cy, text=token.label, fill=C["bg"],
+                                 font=("Segoe UI", max(8, int(radius * 0.7)), "bold"),
+                                 tags=(f"token_{token.id}", "token"))
+        hp_text = f"HP {token.current_hp}/{token.max_hp}"
+        if token.is_down:
+            hp_text += f"  DS {token.death_success}/{token.death_fail}"
+        self._canvas.create_text(cx, cy - radius - 18, text=hp_text, fill=C["amber"],
+                                 font=FONT_TINY, tags=(f"token_{token.id}", "token"))
+        self._canvas.create_text(cx, cy - radius - 6, text=f"{token.name} (I{token.initiative})",
+                                 fill=C["fg"], font=FONT_TINY, tags=(f"token_{token.id}", "token"))
+
     def _find_token_at_canvas(self, cx, cy):
-        """Find which token is at canvas coordinates."""
         if not self._current_map:
             return None
         bmap = self._current_map
         rows, cols = bmap.grid_rows, bmap.grid_cols
-
         if self._bg_image and HAS_PIL:
             canvas_w = int(self._bg_image.width * self._zoom)
             canvas_h = int(self._bg_image.height * self._zoom)
         else:
             canvas_w = cols * 40
             canvas_h = rows * 40
-
-        cell_w = canvas_w / cols
-        cell_h = canvas_h / rows
-
-        gx = int(cx / cell_w)
-        gy = int(cy / cell_h)
+        gx = int(cx * cols / canvas_w)
+        gy = int(cy * rows / canvas_h)
         gx = max(0, min(gx, cols - 1))
         gy = max(0, min(gy, rows - 1))
-
         return bmap.get_token_at(gx, gy), gx, gy
 
-    # ------------------------------------------------------------------
-    # Mouse events
-    # ------------------------------------------------------------------
     def _on_press(self, event):
-        cx = self._canvas.canvasx(event.x)
-        cy = self._canvas.canvasy(event.y)
-        result = self._find_token_at_canvas(cx, cy)
+        result = self._find_token_at_canvas(self._canvas.canvasx(event.x), self._canvas.canvasy(event.y))
         if result and result[0]:
-            token = result[0]
-            self._dragging = token.id
+            self._dragging = result[0].id
 
     def _on_drag(self, event):
         if not self._dragging or not self._current_map:
             return
         cx = self._canvas.canvasx(event.x)
         cy = self._canvas.canvasy(event.y)
-
-        bmap = self._current_map
-        rows, cols = bmap.grid_rows, bmap.grid_cols
-
+        rows, cols = self._current_map.grid_rows, self._current_map.grid_cols
         if self._bg_image and HAS_PIL:
             canvas_w = int(self._bg_image.width * self._zoom)
             canvas_h = int(self._bg_image.height * self._zoom)
         else:
             canvas_w = cols * 40
             canvas_h = rows * 40
-
-        cell_w = canvas_w / cols
-        cell_h = canvas_h / rows
-
-        gx = int(cx / cell_w)
-        gy = int(cy / cell_h)
-        gx = max(0, min(gx, cols - 1))
-        gy = max(0, min(gy, rows - 1))
-
-        # Update token position
-        for token in bmap.tokens:
+        gx = max(0, min(int(cx * cols / canvas_w), cols - 1))
+        gy = max(0, min(int(cy * rows / canvas_h), rows - 1))
+        for token in self._current_map.tokens:
             if token.id == self._dragging:
                 token.grid_x = gx
                 token.grid_y = gy
                 break
-
         self._redraw()
 
     def _on_release(self, event):
@@ -1400,46 +1375,70 @@ class BattleMapTab(tk.Frame):
         self._dragging = None
 
     def _on_right_click(self, event):
-        cx = self._canvas.canvasx(event.x)
-        cy = self._canvas.canvasy(event.y)
-        result = self._find_token_at_canvas(cx, cy)
+        result = self._find_token_at_canvas(self._canvas.canvasx(event.x), self._canvas.canvasy(event.y))
         if not result or not result[0]:
             return
         token = result[0]
-
         menu = tk.Menu(self, tearoff=0, bg=C["bg_card"], fg=C["fg"],
                        activebackground=C["btn_hover"], activeforeground=C["fg"])
-        menu.add_command(label=f"Rename '{token.name}'",
-                         command=lambda: self._rename_token(token))
-        menu.add_command(label=f"Delete '{token.name}'",
-                         command=lambda: self._remove_token(token))
+        menu.add_command(label=f"Damage/Heal '{token.name}'", command=lambda: self._change_hp(token))
+        if token.is_down and token.token_type in {"player", "npc"}:
+            menu.add_command(label="Death save SUCCESS", command=lambda: self._death_save(token, True))
+            menu.add_command(label="Death save FAIL", command=lambda: self._death_save(token, False))
+            menu.add_command(label="Stabilize / Revive to 1 HP", command=lambda: self._revive_token(token))
+        menu.add_command(label=f"Delete '{token.name}'", command=lambda: self._remove_token(token))
         menu.tk_popup(event.x_root, event.y_root)
 
-    def _rename_token(self, token):
-        new_name = simpledialog.askstring(
-            "Rename Token", f"New name for '{token.name}':",
-            initialvalue=token.name,
-            parent=self.winfo_toplevel())
-        if new_name and new_name.strip():
-            token.name = new_name.strip()
-            token.label = new_name[:2].upper()
-            self._cm.update_map(self._cid, self._current_map)
-            self._redraw()
+    def _change_hp(self, token):
+        val = simpledialog.askinteger("HP Change", "Damage (positive) or heal (negative):",
+                                      parent=self.winfo_toplevel(), initialvalue=1)
+        if val is None:
+            return
+        token.current_hp = max(0, min(token.max_hp, token.current_hp - val))
+        if token.current_hp <= 0:
+            if token.token_type == "enemy":
+                self._remove_token(token)
+                return
+            token.is_down = True
+            token.death_success = 0
+            token.death_fail = 0
+        elif token.current_hp > 0:
+            token.is_down = False
+        self._cm.update_map(self._cid, self._current_map)
+        self._redraw()
+
+    def _death_save(self, token, success):
+        if success:
+            token.death_success = min(3, token.death_success + 1)
+            if token.death_success >= 3:
+                token.is_down = True
+        else:
+            token.death_fail = min(3, token.death_fail + 1)
+            if token.death_fail >= 3:
+                self._remove_token(token)
+                return
+        self._cm.update_map(self._cid, self._current_map)
+        self._redraw()
+
+    def _revive_token(self, token):
+        token.current_hp = 1
+        token.is_down = False
+        token.death_success = 0
+        token.death_fail = 0
+        self._cm.update_map(self._cid, self._current_map)
+        self._redraw()
 
     def _remove_token(self, token):
         if self._current_map:
             self._current_map.remove_token(token.id)
+            self._turn_order = [tid for tid in self._turn_order if tid != token.id]
             self._cm.update_map(self._cid, self._current_map)
+            self._update_turn_label()
             self._redraw()
 
     def _on_mousewheel(self, event):
-        # Zoom with Ctrl+Scroll, otherwise scroll vertically
-        import platform
-        if event.state & 0x4:  # Ctrl held
-            if event.delta > 0:
-                self._zoom = min(3.0, self._zoom * 1.1)
-            else:
-                self._zoom = max(0.3, self._zoom / 1.1)
+        if event.state & 0x4:
+            self._zoom = min(3.0, self._zoom * 1.1) if event.delta > 0 else max(0.3, self._zoom / 1.1)
             self._redraw()
         else:
             self._canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
@@ -1760,7 +1759,7 @@ class DnDSoundboard(TkinterDnD.Tk if HAS_DND else tk.Tk):
         # Pre-load tracks
         for t in self._lib.all_tracks():
             try:
-                self._engine.load_track(t.name, t.path)
+                self._engine.load_track(t.name, self._lib.track_path(t))
             except Exception as e:
                 logger.warning("Could not preload '%s': %s", t.name, e)
 
@@ -1822,6 +1821,16 @@ class DnDSoundboard(TkinterDnD.Tk if HAS_DND else tk.Tk):
             self.deiconify()
 
     def _on_global_key(self, event):
+        # Never handle modified/system shortcuts in the soundboard handler.
+        modifier_mask = 0x4 | 0x8 | 0x20000  # Ctrl / Alt / Command(Mac)
+        if event.state & modifier_mask:
+            return
+
+        # Extra guard: control characters (e.g. Ctrl+V sends ) can appear
+        # with unreliable state flags after focus/minimize changes on some systems.
+        if event.char and ord(event.char) < 32:
+            return
+
         w = event.widget
         if isinstance(w, (tk.Entry, ttk.Entry, ttk.Combobox, tk.Text)):
             return

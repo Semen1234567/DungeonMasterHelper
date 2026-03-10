@@ -46,6 +46,7 @@ class Track:
 
     @property
     def path(self) -> str:
+        # Legacy fallback path. Prefer Library.track_path() for campaign-aware paths.
         return os.path.join(LIB_DIR, self.file)
 
     def to_dict(self) -> dict:
@@ -86,7 +87,7 @@ class Library:
             data = json.load(f)
         for d in data:
             t = Track.from_dict(d)
-            if os.path.isfile(t.path):
+            if os.path.isfile(self.track_path(t)):
                 self._all_tracks.append(t)
             else:
                 logger.warning("File missing for '%s', skipping", t.name)
@@ -96,6 +97,23 @@ class Library:
         with open(LIB_JSON, "w", encoding="utf-8") as f:
             json.dump([t.to_dict() for t in self._all_tracks], f,
                       ensure_ascii=False, indent=2)
+
+
+    def _campaign_audio_dir(self, campaign_id: str) -> str:
+        if not campaign_id:
+            return LIB_DIR
+        folder = os.path.join(LIB_DIR, "campaigns", campaign_id)
+        os.makedirs(folder, exist_ok=True)
+        return folder
+
+    def track_path(self, track: Track) -> str:
+        # New layout: music_library/campaigns/<campaign_id>/file
+        if track.campaign_id:
+            new_path = os.path.join(self._campaign_audio_dir(track.campaign_id), track.file)
+            if os.path.isfile(new_path):
+                return new_path
+        # Backward compatibility with old shared storage
+        return os.path.join(LIB_DIR, track.file)
 
     # ------------------------------------------------------------------
     # Filtered view (only tracks for current campaign)
@@ -120,7 +138,8 @@ class Library:
         safe = "".join(c if c.isalnum() or c in " _-" else "_" for c in name)
         safe = safe.strip().replace(" ", "_")
         filename = f"{safe}{ext}"
-        dest = os.path.join(LIB_DIR, filename)
+        dest_dir = self._campaign_audio_dir(self._campaign_id)
+        dest = os.path.join(dest_dir, filename)
 
         # Copy file into library
         if os.path.abspath(source_path) != os.path.abspath(dest):
@@ -130,7 +149,8 @@ class Library:
                       file=filename, hotkey=hotkey,
                       campaign_id=self._campaign_id)
         # Replace if same name exists
-        self._all_tracks = [t for t in self._all_tracks if t.name != name]
+        self._all_tracks = [t for t in self._all_tracks
+                            if not (t.name == name and t.campaign_id == self._campaign_id)]
         self._all_tracks.append(track)
         self._save()
         logger.info("Added %s '%s' [%s] campaign=%s hotkey=%s",
@@ -139,7 +159,7 @@ class Library:
 
     def update_hotkey(self, name: str, hotkey: str) -> bool:
         for t in self._all_tracks:
-            if t.name == name:
+            if t.name == name and (t.campaign_id == self._campaign_id or not self._campaign_id):
                 t.hotkey = hotkey
                 self._save()
                 return True
@@ -147,12 +167,14 @@ class Library:
 
     def remove_track(self, name: str) -> bool:
         before = len(self._all_tracks)
-        removed = [t for t in self._all_tracks if t.name == name]
-        self._all_tracks = [t for t in self._all_tracks if t.name != name]
+        removed = [t for t in self._all_tracks
+                   if t.name == name and (t.campaign_id == self._campaign_id or not self._campaign_id)]
+        self._all_tracks = [t for t in self._all_tracks
+                            if not (t.name == name and t.campaign_id == self._campaign_id)]
         if len(self._all_tracks) < before:
             for t in removed:
                 try:
-                    os.remove(t.path)
+                    os.remove(self.track_path(t))
                 except OSError:
                     pass
             self._save()
