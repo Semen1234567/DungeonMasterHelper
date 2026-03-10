@@ -1,20 +1,3 @@
-"""
-app.py  --  D&D Soundboard + Campaign Manager + Battle Map  (dark-themed GUI)
-==============================================================================
-Modern dark UI with campaign profiles, soundboard, character management,
-and interactive battle maps with grid overlay and draggable tokens.
-
-Tabs:
-  - SOUNDBOARD : three-panel audio (Ambient / Stingers / Fast Stingers)
-  - CHARACTERS : enemies & key NPCs with full D&D stat blocks
-  - BATTLE MAP  : load maps, overlay grid, place & drag tokens
-
-On startup a campaign selector is shown.  Each campaign has its own
-tracks, characters, and maps.
-
-Requires: pygame-ce, Pillow, tkinterdnd2 (optional)
-"""
-
 import os
 import sys
 import logging
