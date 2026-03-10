@@ -1819,8 +1819,15 @@ class DnDSoundboard(TkinterDnD.Tk if HAS_DND else tk.Tk):
             self.deiconify()
 
     def _on_global_key(self, event):
+        # Never handle modified/system shortcuts in the soundboard handler.
+        modifier_mask = 0x4 | 0x8 | 0x20000  # Ctrl / Alt / Command(Mac)
+        if event.state & modifier_mask:
+            return
+
+        # Extra guard: control characters (e.g. Ctrl+V sends ) can appear
+        # with unreliable state flags after focus/minimize changes on some systems.
+        if event.char and ord(event.char) < 32:
         # Do not consume standard shortcuts like Ctrl+V/C/X, Alt+*, Cmd+*.
-        if event.state & (0x4 | 0x8 | 0x20000):
             return
 
         w = event.widget
