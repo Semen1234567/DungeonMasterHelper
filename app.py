@@ -1150,7 +1150,7 @@ class BattleMapTab(tk.Frame):
         bmap = self._cm.add_map(self._cid, name.strip(), path, rows, cols)
         self._current_map = bmap
         self._refresh_map_list()
-        self._map_var.set(bmap.name)
+        self._map_var.set(new_map.name)
         self._load_map_image()
         self._redraw()
 
