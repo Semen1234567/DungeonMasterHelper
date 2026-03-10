@@ -168,12 +168,14 @@ class MusicEngine:
         if snd is None:
             logger.warning("Sound '%s' not loaded", name)
             return
+        prev_snd = self._current_ambient_snd
         self._current_ambient = name
         self._current_ambient_snd = snd
         threading.Thread(target=self._do_crossfade_ambient,
-                         args=(snd,), daemon=True).start()
+                         args=(snd, prev_snd), daemon=True).start()
 
-    def _do_crossfade_ambient(self, snd: pygame.mixer.Sound):
+    def _do_crossfade_ambient(self, snd: pygame.mixer.Sound,
+                              prev_snd: pygame.mixer.Sound | None = None):
         fade = self._ambient_crossfade
 
         # Fade out currently playing stinger layers while fading ambient in.
