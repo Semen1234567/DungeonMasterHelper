@@ -1388,9 +1388,10 @@ class BattleMapTab(tk.Frame):
     def _on_drag(self, event):
         if not self._dragging or not self._current_map:
             return
+        bmap = self._current_map
         cx = self._canvas.canvasx(event.x)
         cy = self._canvas.canvasy(event.y)
-        rows, cols = self._current_map.grid_rows, self._current_map.grid_cols
+        rows, cols = bmap.grid_rows, bmap.grid_cols
         if self._bg_image and HAS_PIL:
             canvas_w = int(self._bg_image.width * self._zoom)
             canvas_h = int(self._bg_image.height * self._zoom)
@@ -1405,6 +1406,12 @@ class BattleMapTab(tk.Frame):
                 token.grid_y = gy
                 break
         self._redraw()
+
+    def _on_double_click_damage(self, event):
+        result = self._find_token_at_canvas(self._canvas.canvasx(event.x), self._canvas.canvasy(event.y))
+        if not result or not result[0]:
+            return
+        self._change_hp(result[0])
 
     def _on_release(self, event):
         if self._dragging and self._current_map:
