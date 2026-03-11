@@ -1085,6 +1085,9 @@ class BattleMapTab(tk.Frame):
         self._canvas.bind("<B1-Motion>", self._on_drag)
         self._canvas.bind("<ButtonRelease-1>", self._on_release)
         self._canvas.bind("<Button-3>", self._on_right_click)
+        self._canvas.bind("<Button-2>", self._on_right_click)
+        self._canvas.bind("<Shift-Button-1>", self._on_right_click)
+        self._canvas.bind("<Double-Button-1>", self._on_double_click_damage)
         self._canvas.bind("<MouseWheel>", self._on_mousewheel)
 
         side = tk.Frame(body, bg=C["bg_card"], width=230)
