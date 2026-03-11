@@ -368,6 +368,7 @@ class MusicEngine:
     def stop_ambient(self) -> None:
         """Stop only ambient (stinger keeps playing if active)."""
         self._ch_ambient.fadeout(self._stop_fade)
+        self._ch_transition.fadeout(self._stop_fade)
         self._current_ambient = None
         self._current_ambient_snd = None
 
