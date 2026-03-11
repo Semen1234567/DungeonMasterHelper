@@ -1323,6 +1323,13 @@ class BattleMapTab(tk.Frame):
             fill=C["fg"], font=FONT_TINY,
             tags=(f"token_{token.id}", "token"))
 
+        # Current HP below token
+        hp_color = C["stop_fg"] if token.current_hp <= 0 else C["fg"]
+        self._canvas.create_text(
+            cx, cy + radius + 8, text=f"HP {token.current_hp}/{token.max_hp}",
+            fill=hp_color, font=FONT_TINY,
+            tags=(f"token_{token.id}", "token"))
+
     # ------------------------------------------------------------------
     # Token management
     # ------------------------------------------------------------------
@@ -1434,14 +1441,11 @@ class BattleMapTab(tk.Frame):
             return
         token.current_hp = max(0, min(token.max_hp, token.current_hp - val))
         if token.current_hp <= 0:
-            if token.token_type == "enemy":
-                self._remove_token(token)
-                return
-            token.is_down = True
-            token.death_success = 0
-            token.death_fail = 0
-        elif token.current_hp > 0:
-            token.is_down = False
+            self._remove_token(token)
+            return
+        token.is_down = False
+        token.death_success = 0
+        token.death_fail = 0
         self._cm.update_map(self._cid, self._current_map)
         self._redraw()
 
