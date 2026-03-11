@@ -96,6 +96,7 @@ class MusicEngine:
         self._stinger_busy = False
         self._stinger_cancel = threading.Event()
         self._pending_stinger: pygame.mixer.Sound | None = None
+        self._ambient_lock = threading.Lock()
 
         logger.info("MusicEngine ready  (pygame-ce %s)", pygame.version.ver)
 
@@ -193,13 +194,19 @@ class MusicEngine:
                 self._ch_transition.set_volume(prev_vol)
                 self._ch_transition.play(prev_snd, loops=-1)
                 threading.Thread(target=self._ramp,
-                                 args=(self._ch_transition, prev_vol, 0.0, fade),
+                                 args=(old_ch, old_vol, 0.0, fade),
                                  daemon=True).start()
+                self._ramp(new_ch, 0.0, self._vol_ambient, fade)
+                old_ch.stop()
+                old_ch.set_volume(0.0)
+                self._ch_ambient, self._ch_transition = new_ch, old_ch
+                return
 
-        self._ch_ambient.stop()
-        self._ch_ambient.set_volume(0.0)
-        self._ch_ambient.play(snd, loops=-1)
-        self._ramp(self._ch_ambient, 0.0, self._vol_ambient, fade)
+            # No active ambient yet (or instant switch without fade).
+            old_ch.stop()
+            old_ch.set_volume(0.0)
+            old_ch.play(snd, loops=-1)
+            self._ramp(old_ch, 0.0, self._vol_ambient, fade)
 
     # ------------------------------------------------------------------
     # Stinger playback  (fully replaces ambient while playing)
