@@ -186,12 +186,12 @@ class MusicEngine:
 
         # Ambient -> Ambient overlap: replay current ambient on transition channel
         # and fade it out while the new ambient fades in.
-        if self._ch_ambient.get_busy() and self._current_ambient_snd is not None:
+        if self._ch_ambient.get_busy() and prev_snd is not None:
             prev_vol = self._ch_ambient.get_volume()
             if prev_vol > 0.0:
                 self._ch_transition.stop()
                 self._ch_transition.set_volume(prev_vol)
-                self._ch_transition.play(self._current_ambient_snd, loops=-1)
+                self._ch_transition.play(prev_snd, loops=-1)
                 threading.Thread(target=self._ramp,
                                  args=(self._ch_transition, prev_vol, 0.0, fade),
                                  daemon=True).start()
@@ -357,6 +357,7 @@ class MusicEngine:
     def stop_ambient(self) -> None:
         """Stop only ambient (stinger keeps playing if active)."""
         self._ch_ambient.fadeout(self._stop_fade)
+        self._ch_transition.fadeout(self._stop_fade)
         self._current_ambient = None
         self._current_ambient_snd = None
 

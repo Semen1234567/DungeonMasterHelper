@@ -1152,7 +1152,7 @@ class BattleMapTab(tk.Frame):
         bmap = self._cm.add_map(self._cid, name.strip(), path, rows, cols)
         self._current_map = bmap
         self._refresh_map_list()
-        self._map_var.set(new_map.name)
+        self._map_var.set(bmap.name)
         self._load_map_image()
         self._redraw()
 
@@ -1323,6 +1323,13 @@ class BattleMapTab(tk.Frame):
             fill=C["fg"], font=FONT_TINY,
             tags=(f"token_{token.id}", "token"))
 
+        # Current HP below token
+        hp_color = C["stop_fg"] if token.current_hp <= 0 else C["fg"]
+        self._canvas.create_text(
+            cx, cy + radius + 8, text=f"HP {token.current_hp}/{token.max_hp}",
+            fill=hp_color, font=FONT_TINY,
+            tags=(f"token_{token.id}", "token"))
+
     # ------------------------------------------------------------------
     # Token management
     # ------------------------------------------------------------------
@@ -1377,9 +1384,10 @@ class BattleMapTab(tk.Frame):
     def _on_drag(self, event):
         if not self._dragging or not self._current_map:
             return
+        bmap = self._current_map
         cx = self._canvas.canvasx(event.x)
         cy = self._canvas.canvasy(event.y)
-        rows, cols = self._current_map.grid_rows, self._current_map.grid_cols
+        rows, cols = bmap.grid_rows, bmap.grid_cols
         if self._bg_image and HAS_PIL:
             canvas_w = int(self._bg_image.width * self._zoom)
             canvas_h = int(self._bg_image.height * self._zoom)
@@ -1399,6 +1407,12 @@ class BattleMapTab(tk.Frame):
                 token.grid_y = gy
                 break
         self._redraw()
+
+    def _on_double_click_damage(self, event):
+        result = self._find_token_at_canvas(self._canvas.canvasx(event.x), self._canvas.canvasy(event.y))
+        if not result or not result[0]:
+            return
+        self._change_hp(result[0])
 
     def _on_release(self, event):
         if self._dragging and self._current_map:
@@ -1427,14 +1441,11 @@ class BattleMapTab(tk.Frame):
             return
         token.current_hp = max(0, min(token.max_hp, token.current_hp - val))
         if token.current_hp <= 0:
-            if token.token_type == "enemy":
-                self._remove_token(token)
-                return
-            token.is_down = True
-            token.death_success = 0
-            token.death_fail = 0
-        elif token.current_hp > 0:
-            token.is_down = False
+            self._remove_token(token)
+            return
+        token.is_down = False
+        token.death_success = 0
+        token.death_fail = 0
         self._cm.update_map(self._cid, self._current_map)
         self._redraw()
 
