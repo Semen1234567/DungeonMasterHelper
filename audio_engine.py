@@ -96,6 +96,7 @@ class MusicEngine:
         self._stinger_busy = False
         self._stinger_cancel = threading.Event()
         self._pending_stinger: pygame.mixer.Sound | None = None
+        self._ambient_lock = threading.Lock()
 
         logger.info("MusicEngine ready  (pygame-ce %s)", pygame.version.ver)
 
@@ -178,28 +179,37 @@ class MusicEngine:
                               prev_snd: pygame.mixer.Sound | None = None):
         fade = self._ambient_crossfade
 
-        # Fade out currently playing stinger layers while fading ambient in.
-        self._stinger_cancel.set()
-        for ch in self._stinger_channels:
-            if ch.get_busy():
-                ch.fadeout(max(100, min(fade, self._stinger_fade_out)))
+        with self._ambient_lock:
+            # Fade out currently playing stinger layers while fading ambient in.
+            self._stinger_cancel.set()
+            for ch in self._stinger_channels:
+                if ch.get_busy():
+                    ch.fadeout(max(100, min(fade, self._stinger_fade_out)))
 
-        # Ambient -> Ambient overlap: replay current ambient on transition channel
-        # and fade it out while the new ambient fades in.
-        if self._ch_ambient.get_busy() and self._current_ambient_snd is not None:
-            prev_vol = self._ch_ambient.get_volume()
-            if prev_vol > 0.0:
-                self._ch_transition.stop()
-                self._ch_transition.set_volume(prev_vol)
-                self._ch_transition.play(self._current_ambient_snd, loops=-1)
+            old_ch = self._ch_ambient
+            new_ch = self._ch_transition
+
+            # Crossfade from currently playing ambient position (old_ch)
+            # to newly selected ambient (new_ch), then swap channel roles.
+            if old_ch.get_busy() and fade > 0:
+                old_vol = old_ch.get_volume()
+                new_ch.stop()
+                new_ch.set_volume(0.0)
+                new_ch.play(snd, loops=-1)
                 threading.Thread(target=self._ramp,
-                                 args=(self._ch_transition, prev_vol, 0.0, fade),
+                                 args=(old_ch, old_vol, 0.0, fade),
                                  daemon=True).start()
+                self._ramp(new_ch, 0.0, self._vol_ambient, fade)
+                old_ch.stop()
+                old_ch.set_volume(0.0)
+                self._ch_ambient, self._ch_transition = new_ch, old_ch
+                return
 
-        self._ch_ambient.stop()
-        self._ch_ambient.set_volume(0.0)
-        self._ch_ambient.play(snd, loops=-1)
-        self._ramp(self._ch_ambient, 0.0, self._vol_ambient, fade)
+            # No active ambient yet (or instant switch without fade).
+            old_ch.stop()
+            old_ch.set_volume(0.0)
+            old_ch.play(snd, loops=-1)
+            self._ramp(old_ch, 0.0, self._vol_ambient, fade)
 
     # ------------------------------------------------------------------
     # Stinger playback  (fully replaces ambient while playing)
@@ -357,6 +367,7 @@ class MusicEngine:
     def stop_ambient(self) -> None:
         """Stop only ambient (stinger keeps playing if active)."""
         self._ch_ambient.fadeout(self._stop_fade)
+        self._ch_transition.fadeout(self._stop_fade)
         self._current_ambient = None
         self._current_ambient_snd = None
 
