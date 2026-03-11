@@ -1102,7 +1102,7 @@ class BattleMapTab(tk.Frame):
         self._refresh_map_list()
 
     def _refresh_characters_list(self):
-        self._characters = self._cm.list_characters(self._cid)
+        self._characters = self._cm.load_characters (self._cid)
         self._char_list.delete(0, tk.END)
         for c in self._characters:
             self._char_list.insert(tk.END, f"[{c.char_type}] {c.name}")
