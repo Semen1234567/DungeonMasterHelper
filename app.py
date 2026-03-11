@@ -1089,6 +1089,9 @@ class BattleMapTab(tk.Frame):
         self._turn_var = tk.StringVar(value="Turn: -")
         tk.Label(side, textvariable=self._turn_var, bg=C["bg_card"], fg=C["fg"],
                  font=FONT_SMALL, justify="left", wraplength=200).pack(anchor="w", padx=8, pady=(2, 2))
+        self._turn_list = tk.Listbox(side, bg=C["bg_panel"], fg=C["fg"], selectbackground=C["btn_hover"],
+                                     height=8, relief="flat")
+        self._turn_list.pack(fill="x", padx=8, pady=(0, 4))
         make_button(side, "Next Turn", self._next_turn,
                     font=FONT_SMALL, padx=6, pady=2).pack(anchor="w", padx=8, pady=2)
         make_button(side, "Roll Initiative", self._roll_initiative,
@@ -1117,6 +1120,7 @@ class BattleMapTab(tk.Frame):
             self._turn_order = []
             self._turn_index = 0
             self._turn_var.set("Turn: -")
+            self._refresh_turn_order_view()
         self._redraw()
 
     def _refresh_map_list(self):
@@ -1152,7 +1156,7 @@ class BattleMapTab(tk.Frame):
         bmap = self._cm.add_map(self._cid, name.strip(), path, rows, cols)
         self._current_map = bmap
         self._refresh_map_list()
-        self._map_var.set(new_map.name)
+        self._map_var.set(bmap.name)
         self._load_map_image()
         self._redraw()
 
@@ -1250,11 +1254,25 @@ class BattleMapTab(tk.Frame):
     def _update_turn_label(self):
         if not self._turn_order or not self._current_map:
             self._turn_var.set("Turn: -")
+            self._refresh_turn_order_view()
             return
         tid = self._turn_order[self._turn_index]
         token = next((t for t in self._current_map.tokens if t.id == tid), None)
         if token:
             self._turn_var.set(f"Turn: {token.name} (Init {token.initiative})")
+        self._refresh_turn_order_view()
+
+    def _refresh_turn_order_view(self):
+        self._turn_list.delete(0, tk.END)
+        if not self._current_map or not self._turn_order:
+            return
+        by_id = {t.id: t for t in self._current_map.tokens}
+        for idx, tid in enumerate(self._turn_order):
+            token = by_id.get(tid)
+            if not token:
+                continue
+            marker = "→ " if idx == self._turn_index else "  "
+            self._turn_list.insert(tk.END, f"{marker}{idx + 1}. {token.name} ({token.initiative})")
 
     def _redraw(self):
         self._canvas.delete("all")
@@ -1323,6 +1341,13 @@ class BattleMapTab(tk.Frame):
             fill=C["fg"], font=FONT_TINY,
             tags=(f"token_{token.id}", "token"))
 
+        # Current HP below token
+        hp_color = C["stop_fg"] if token.current_hp <= 0 else C["fg"]
+        self._canvas.create_text(
+            cx, cy + radius + 8, text=f"HP {token.current_hp}/{token.max_hp}",
+            fill=hp_color, font=FONT_TINY,
+            tags=(f"token_{token.id}", "token"))
+
     # ------------------------------------------------------------------
     # Token management
     # ------------------------------------------------------------------
@@ -1377,9 +1402,10 @@ class BattleMapTab(tk.Frame):
     def _on_drag(self, event):
         if not self._dragging or not self._current_map:
             return
+        bmap = self._current_map
         cx = self._canvas.canvasx(event.x)
         cy = self._canvas.canvasy(event.y)
-        rows, cols = self._current_map.grid_rows, self._current_map.grid_cols
+        rows, cols = bmap.grid_rows, bmap.grid_cols
         if self._bg_image and HAS_PIL:
             canvas_w = int(self._bg_image.width * self._zoom)
             canvas_h = int(self._bg_image.height * self._zoom)
@@ -1399,6 +1425,12 @@ class BattleMapTab(tk.Frame):
                 token.grid_y = gy
                 break
         self._redraw()
+
+    def _on_double_click_damage(self, event):
+        result = self._find_token_at_canvas(self._canvas.canvasx(event.x), self._canvas.canvasy(event.y))
+        if not result or not result[0]:
+            return
+        self._change_hp(result[0])
 
     def _on_release(self, event):
         if self._dragging and self._current_map:
@@ -1427,14 +1459,11 @@ class BattleMapTab(tk.Frame):
             return
         token.current_hp = max(0, min(token.max_hp, token.current_hp - val))
         if token.current_hp <= 0:
-            if token.token_type == "enemy":
-                self._remove_token(token)
-                return
-            token.is_down = True
-            token.death_success = 0
-            token.death_fail = 0
-        elif token.current_hp > 0:
-            token.is_down = False
+            self._remove_token(token)
+            return
+        token.is_down = False
+        token.death_success = 0
+        token.death_fail = 0
         self._cm.update_map(self._cid, self._current_map)
         self._redraw()
 
@@ -1463,6 +1492,10 @@ class BattleMapTab(tk.Frame):
         if self._current_map:
             self._current_map.remove_token(token.id)
             self._turn_order = [tid for tid in self._turn_order if tid != token.id]
+            if self._turn_order:
+                self._turn_index = min(self._turn_index, len(self._turn_order) - 1)
+            else:
+                self._turn_index = 0
             self._cm.update_map(self._cid, self._current_map)
             self._update_turn_label()
             self._redraw()
