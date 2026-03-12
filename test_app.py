@@ -7,6 +7,8 @@ import struct
 import wave
 import math
 import tempfile
+import shutil
+import time
 import unittest
 
 os.environ["SDL_AUDIODRIVER"] = "dummy"
@@ -19,7 +21,7 @@ from library import Library, Track, LIB_DIR, LIB_JSON
 
 
 def make_wav(path: str, duration: float = 0.5, freq: int = 440) -> str:
-    sr = 44100
+    sr = 8000
     n = int(sr * duration)
     with wave.open(path, "w") as wf:
         wf.setnchannels(1)
@@ -39,6 +41,10 @@ class TestMusicEngine(unittest.TestCase):
         cls.engine = MusicEngine()
         cls.tmpdir = tempfile.mkdtemp()
 
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmpdir, ignore_errors=True)
+
     def _wav(self, name, dur=0.3):
         return make_wav(os.path.join(self.tmpdir, name), dur)
 
@@ -50,22 +56,54 @@ class TestMusicEngine(unittest.TestCase):
     def test_play_ambient(self):
         p = self._wav("b.wav")
         self.engine.load_track("TestB", p)
-        self.engine.play_ambient("TestB", fade_ms=50)
+        self.engine.set_ambient_crossfade(50)
+        self.engine.play_ambient("TestB")
         self.assertEqual(self.engine.get_current_ambient(), "TestB")
 
     def test_play_stinger(self):
         p = self._wav("c.wav", dur=0.2)
         self.engine.load_track("TestC", p)
-        self.engine.play_stinger("TestC", fade_ms=50)
+        self.engine.set_stinger_fade_in(50)
+        self.engine.play_stinger("TestC")
         # no crash
 
+    def test_background_warmup(self):
+        p = self._wav("warm.wav")
+        self.engine.load_track("WarmTrack", p)
+        self.engine.warmup_tracks(["WarmTrack"])
+
+        for _ in range(20):
+            if "WarmTrack" in self.engine._sounds:
+                break
+            time.sleep(0.02)
+
+        self.assertIn("WarmTrack", self.engine._sounds)
+
     def test_stop(self):
-        self.engine.stop(fade_ms=50)
+        self.engine.set_stop_fade(50)
+        self.engine.stop_all()
         self.assertIsNone(self.engine.get_current_ambient())
 
-    def test_volume(self):
-        self.engine.set_volume(0.5)
-        self.assertAlmostEqual(self.engine._master, 0.5)
+    def test_restore_previous_ambient_after_stinger_stop(self):
+        ambient = self._wav("ambient.wav", dur=0.6)
+        stinger = self._wav("stinger.wav", dur=0.2)
+        self.engine.load_track("AmbientRestore", ambient)
+        self.engine.load_track("StingerRestore", stinger)
+        self.engine.set_ambient_crossfade(20)
+        self.engine.set_ambient_duck_out(20)
+        self.engine.set_ambient_restore_in(20)
+        self.engine.set_stinger_fade_in(20)
+        self.engine.set_stinger_fade_out(20)
+        self.engine.set_stop_fade(20)
+
+        self.engine.play_ambient("AmbientRestore")
+        time.sleep(0.05)
+        self.engine.play_stinger("StingerRestore")
+        time.sleep(0.05)
+        self.engine.stop_stinger()
+        time.sleep(0.1)
+
+        self.assertEqual(self.engine.get_current_ambient(), "AmbientRestore")
 
 
 class TestLibrary(unittest.TestCase):
@@ -77,6 +115,9 @@ class TestLibrary(unittest.TestCase):
         libmod.LIB_JSON = os.path.join(self.tmpdir, "library.json")
         self.lib = Library()
         self.lib._tracks = []  # clean
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_add_and_get(self):
         wav = make_wav(os.path.join(self.tmpdir, "src.wav"))

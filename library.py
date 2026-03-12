@@ -24,6 +24,8 @@ import os
 import shutil
 import logging
 
+from audio_cache import cleanup_cached_audio
+
 logger = logging.getLogger(__name__)
 
 LIB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "music_library")
@@ -173,6 +175,7 @@ class Library:
                             if not (t.name == name and t.campaign_id == self._campaign_id)]
         if len(self._all_tracks) < before:
             for t in removed:
+                cleanup_cached_audio(self.track_path(t))
                 try:
                     os.remove(self.track_path(t))
                 except OSError:

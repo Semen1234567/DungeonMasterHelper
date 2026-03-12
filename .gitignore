@@ -1,14 +1,18 @@
 # Python
 __pycache__/
 *.pyc
+.venv/
 
 # IDE
 .idea/
 .vscode/
+.dist/
 
 # Local data
 music_library/
 campaigns/
+app_settings.json
+.audio_cache/
 
 # Media
 *.mp3

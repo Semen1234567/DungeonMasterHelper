@@ -15,6 +15,9 @@ Transition behaviour:
   - Stinger -> Stinger: outgoing stinger fades out while next fades in.
   - After stinger end/cancel, ambient fades back to target volume.
 
+Tracks are registered on startup, then warmed up in two phases:
+preview WAVs first, full WAVs after that. This keeps the campaign window
+responsive while still preparing audio for later playback.
 All fades run in background threads so the GUI stays responsive.
 """
 
@@ -24,6 +27,7 @@ import time
 import logging
 
 import pygame
+from audio_cache import PREVIEW_SECONDS, ensure_full_wav, ensure_preview_wav
 
 logger = logging.getLogger(__name__)
 
@@ -40,13 +44,17 @@ class MusicEngine:
     """
     Public API
     ----------
-    load_track(name, path)                -> load a Sound object
+    load_track(name, path)                -> register a source track for lazy WAV caching
+    prepare_track(name)                   -> background-build preview/full WAV assets for one track
     play_ambient(name)                    -> crossfade to ambient loop
     play_stinger(name)                    -> fade out ambient, play stinger alone, restore
     play_fast_stinger(name)               -> instant one-shot, no fade
     stop_all()                            -> fade out everything
     stop_ambient()                        -> fade out ambient only
     stop_stinger()                        -> fade out stinger only (and restore ambient)
+    clear_tracks()                        -> forget all registered tracks
+    warmup_tracks(names=None)             -> background-load registered tracks
+    cancel_warmup()                       -> cancel the current background warmup
     set_ambient_volume(vol)               -> ambient volume 0.0 .. 1.0
     set_stinger_volume(vol)               -> stinger volume 0.0 .. 1.0
     set_fast_stinger_volume(vol)          -> fast stinger volume 0.0 .. 1.0
@@ -76,9 +84,13 @@ class MusicEngine:
                                for i in range(4, 4 + FAST_STINGER_CHANNELS)]
         self._fast_idx = 0
 
+        self._track_paths: dict[str, str] = {}
+        self._preview_sounds: dict[str, pygame.mixer.Sound] = {}
         self._sounds: dict[str, pygame.mixer.Sound] = {}
         self._current_ambient: str | None = None
         self._current_ambient_snd: pygame.mixer.Sound | None = None
+        self._suspended_ambient: str | None = None
+        self._suspended_ambient_snd: pygame.mixer.Sound | None = None
 
         self._vol_ambient: float = 1.0
         self._vol_stinger: float = 1.0
@@ -95,8 +107,12 @@ class MusicEngine:
         self._lock = threading.Lock()
         self._stinger_busy = False
         self._stinger_cancel = threading.Event()
+        self._stinger_stop_requested = threading.Event()
         self._pending_stinger: pygame.mixer.Sound | None = None
         self._ambient_lock = threading.Lock()
+        self._warmup_token = 0
+        self._preview_loading: set[str] = set()
+        self._full_loading: set[str] = set()
 
         logger.info("MusicEngine ready  (pygame-ce %s)", pygame.version.ver)
 
@@ -146,32 +162,211 @@ class MusicEngine:
         self._stop_fade = max(0, int(ms))
 
     # ------------------------------------------------------------------
-    # Track loading
+    # Track registration / loading
     # ------------------------------------------------------------------
     def load_track(self, name: str, path: str) -> None:
         if not os.path.isfile(path):
             raise FileNotFoundError(path)
-        snd = pygame.mixer.Sound(path)
-        snd.set_volume(1.0)
         with self._lock:
-            self._sounds[name] = snd
-        logger.info("Loaded '%s' from %s", name, path)
+            norm_path = os.path.abspath(path)
+            if self._track_paths.get(name) != norm_path:
+                self._preview_sounds.pop(name, None)
+                self._sounds.pop(name, None)
+            self._track_paths[name] = norm_path
+        logger.info("Registered '%s' from %s", name, path)
 
     def unload_track(self, name: str) -> None:
         with self._lock:
+            self._track_paths.pop(name, None)
+            self._preview_sounds.pop(name, None)
             self._sounds.pop(name, None)
+
+    def clear_tracks(self) -> None:
+        self.cancel_warmup()
+        with self._lock:
+            self._track_paths.clear()
+            self._preview_sounds.clear()
+            self._sounds.clear()
+            self._preview_loading.clear()
+            self._full_loading.clear()
+        self._current_ambient = None
+        self._current_ambient_snd = None
+        self._suspended_ambient = None
+        self._suspended_ambient_snd = None
+
+    def cancel_warmup(self) -> None:
+        with self._lock:
+            self._warmup_token += 1
+
+    def warmup_tracks(self, names: list[str] | None = None, delay_ms: int = 0) -> None:
+        with self._lock:
+            self._warmup_token += 1
+            token = self._warmup_token
+            if names is None:
+                queue = list(self._track_paths)
+            else:
+                queue = [name for name in names if name in self._track_paths]
+
+        if not queue:
+            return
+
+        threading.Thread(
+            target=self._warmup_worker,
+            args=(token, queue, max(0, int(delay_ms))),
+            daemon=True,
+        ).start()
+
+    def prepare_track(self, name: str) -> None:
+        threading.Thread(
+            target=self._prepare_track_worker,
+            args=(name,),
+            daemon=True,
+        ).start()
+
+    def _warmup_worker(self, token: int, queue: list[str], delay_ms: int) -> None:
+        if delay_ms > 0:
+            remaining = delay_ms / 1000.0
+            while remaining > 0:
+                if not self._warmup_is_current(token):
+                    return
+                step = min(0.05, remaining)
+                time.sleep(step)
+                remaining -= step
+
+        logger.info("Preview warmup started for %d tracks (%ds)", len(queue), PREVIEW_SECONDS)
+        preview_loaded = 0
+        for name in queue:
+            if not self._warmup_is_current(token):
+                logger.info("Warmup cancelled during preview phase")
+                return
+            if self._get_preview_sound(name) is not None:
+                preview_loaded += 1
+            time.sleep(0.01)
+
+        logger.info("Full WAV warmup started for %d tracks", len(queue))
+        full_loaded = 0
+        for name in queue:
+            if not self._warmup_is_current(token):
+                logger.info("Warmup cancelled during full phase")
+                return
+            if self._get_full_sound(name) is not None:
+                full_loaded += 1
+            time.sleep(0.01)
+
+        if self._warmup_is_current(token):
+            logger.info(
+                "Warmup finished: preview=%d/%d full=%d/%d",
+                preview_loaded,
+                len(queue),
+                full_loaded,
+                len(queue),
+            )
+
+    def _prepare_track_worker(self, name: str) -> None:
+        self._get_preview_sound(name)
+        self._get_full_sound(name)
+
+    def _warmup_is_current(self, token: int) -> bool:
+        with self._lock:
+            return token == self._warmup_token
+
+    def _get_preview_sound(self, name: str) -> pygame.mixer.Sound | None:
+        return self._get_cached_sound(
+            name,
+            self._preview_sounds,
+            self._preview_loading,
+            lambda source_path: ensure_preview_wav(source_path, PREVIEW_SECONDS),
+            "preview",
+        )
+
+    def _get_full_sound(self, name: str) -> pygame.mixer.Sound | None:
+        return self._get_cached_sound(
+            name,
+            self._sounds,
+            self._full_loading,
+            ensure_full_wav,
+            "full",
+        )
+
+    def _get_play_sound(self, name: str) -> pygame.mixer.Sound | None:
+        with self._lock:
+            snd = self._sounds.get(name)
+        if snd is not None:
+            return snd
+        with self._lock:
+            preview = self._preview_sounds.get(name)
+        if preview is not None:
+            self.prepare_track(name)
+            return preview
+        preview = self._get_preview_sound(name)
+        if preview is not None:
+            self.prepare_track(name)
+            return preview
+        return self._get_full_sound(name)
+
+    def _get_cached_sound(
+        self,
+        name: str,
+        cache: dict[str, pygame.mixer.Sound],
+        loading_set: set[str],
+        path_builder,
+        label: str,
+    ) -> pygame.mixer.Sound | None:
+        with self._lock:
+            snd = cache.get(name)
+            source_path = self._track_paths.get(name)
+        if snd is not None:
+            return snd
+        if source_path is None:
+            logger.warning("Sound '%s' not registered", name)
+            return None
+
+        claimed = False
+        while True:
+            with self._lock:
+                snd = cache.get(name)
+                if snd is not None:
+                    return snd
+                if name not in loading_set:
+                    loading_set.add(name)
+                    claimed = True
+                    break
+            time.sleep(0.01)
+
+        try:
+            asset_path = path_builder(source_path)
+            loaded = pygame.mixer.Sound(asset_path)
+            loaded.set_volume(1.0)
+            with self._lock:
+                existing = cache.get(name)
+                current_path = self._track_paths.get(name)
+                if existing is not None:
+                    return existing
+                if current_path == source_path:
+                    cache[name] = loaded
+                    logger.info("Loaded %s '%s' from %s", label, name, asset_path)
+                    return loaded
+            return None
+        except Exception as ex:
+            logger.warning("Could not load %s '%s' from %s: %s", label, name, source_path, ex)
+            return None
+        finally:
+            if claimed:
+                with self._lock:
+                    loading_set.discard(name)
 
     # ------------------------------------------------------------------
     # Ambient playback
     # ------------------------------------------------------------------
     def play_ambient(self, name: str) -> None:
-        snd = self._sounds.get(name)
+        snd = self._get_play_sound(name)
         if snd is None:
-            logger.warning("Sound '%s' not loaded", name)
             return
         prev_snd = self._current_ambient_snd
         self._current_ambient = name
         self._current_ambient_snd = snd
+        self._suspended_ambient = None
+        self._suspended_ambient_snd = None
         threading.Thread(target=self._do_crossfade_ambient,
                          args=(snd, prev_snd), daemon=True).start()
 
@@ -213,13 +408,16 @@ class MusicEngine:
     # Stinger playback  (fully replaces ambient while playing)
     # ------------------------------------------------------------------
     def play_stinger(self, name: str) -> None:
-        snd = self._sounds.get(name)
+        snd = self._get_play_sound(name)
         if snd is None:
-            logger.warning("Sound '%s' not loaded", name)
             return
 
         start_worker = False
         with self._lock:
+            if not self._stinger_busy:
+                self._suspended_ambient = self._current_ambient
+                self._suspended_ambient_snd = self._current_ambient_snd
+                self._stinger_stop_requested.clear()
             # Keep only the latest requested stinger to allow quick switching.
             self._pending_stinger = snd
             if self._stinger_busy:
@@ -284,9 +482,9 @@ class MusicEngine:
             # If a new stinger is queued, let next cycle crossfade from this one.
             if self._has_pending_stinger():
                 return
+            if self._stinger_stop_requested.is_set():
+                return
             in_ch.fadeout(500)
-            threading.Thread(target=self._restore_after_stinger_stop,
-                             args=(500,), daemon=True).start()
             return
 
         # Wait most of stinger duration
@@ -296,43 +494,56 @@ class MusicEngine:
             if self._stinger_cancel.is_set():
                 if self._has_pending_stinger():
                     return
+                if self._stinger_stop_requested.is_set():
+                    return
                 in_ch.fadeout(500)
-                threading.Thread(target=self._restore_after_stinger_stop,
-                                 args=(500,), daemon=True).start()
                 return
             step = min(0.1, wait - elapsed)
             time.sleep(step)
             elapsed += step
 
-        # Fade current stinger out
+        # Crossfade the stinger out against the suspended ambient.
+        self._start_ambient_restore()
         self._ramp(in_ch, in_ch.get_volume(), 0.0, self._stinger_fade_out)
         in_ch.stop()
 
-        self._restore_ambient()
-
-    def _restore_after_stinger_stop(self, fade_ms: int):
-        time.sleep(max(0.0, fade_ms) / 1000.0)
-        self._restore_ambient()
-
-    def _restore_ambient(self):
-        """Fade ambient back to its normal volume when no stinger remains."""
-        if any(ch.get_busy() for ch in self._stinger_channels):
-            return
+    def _start_ambient_restore(self):
+        """Fade the suspended ambient back in, overlapping the stinger fade-out."""
         fade = self._ambient_restore_in
-        if self._ch_ambient.get_busy():
-            self._ramp(self._ch_ambient, self._ch_ambient.get_volume(), self._vol_ambient, fade)
-        elif self._current_ambient_snd is not None:
+        restore_name = self._current_ambient
+        restore_snd = self._current_ambient_snd
+
+        if self._suspended_ambient_snd is not None:
+            restore_name = self._suspended_ambient
+            restore_snd = self._suspended_ambient_snd
+
+        self._current_ambient = restore_name
+        self._current_ambient_snd = restore_snd
+        self._suspended_ambient = None
+        self._suspended_ambient_snd = None
+        self._stinger_stop_requested.clear()
+
+        if self._ch_ambient.get_busy() and restore_snd is not None:
+            threading.Thread(
+                target=self._ramp,
+                args=(self._ch_ambient, self._ch_ambient.get_volume(), self._vol_ambient, fade),
+                daemon=True,
+            ).start()
+        elif restore_snd is not None:
             self._ch_ambient.set_volume(0.0)
-            self._ch_ambient.play(self._current_ambient_snd, loops=-1)
-            self._ramp(self._ch_ambient, 0.0, self._vol_ambient, fade)
+            self._ch_ambient.play(restore_snd, loops=-1)
+            threading.Thread(
+                target=self._ramp,
+                args=(self._ch_ambient, 0.0, self._vol_ambient, fade),
+                daemon=True,
+            ).start()
 
     # ------------------------------------------------------------------
     # Fast stinger (instant, no fade, no ducking)
     # ------------------------------------------------------------------
     def play_fast_stinger(self, name: str) -> None:
-        snd = self._sounds.get(name)
+        snd = self._get_play_sound(name)
         if snd is None:
-            logger.warning("Sound '%s' not loaded", name)
             return
         ch = self._fast_channels[self._fast_idx % len(self._fast_channels)]
         self._fast_idx += 1
@@ -364,6 +575,7 @@ class MusicEngine:
         """Stop everything."""
         fade = self._stop_fade
         self._stinger_cancel.set()
+        self._stinger_stop_requested.clear()
         self._ch_ambient.fadeout(fade)
         self._ch_transition.fadeout(fade)
         for ch in self._stinger_channels:
@@ -372,6 +584,8 @@ class MusicEngine:
             ch.stop()
         self._current_ambient = None
         self._current_ambient_snd = None
+        self._suspended_ambient = None
+        self._suspended_ambient_snd = None
 
     def stop_ambient(self) -> None:
         """Stop only ambient (stinger keeps playing if active)."""
@@ -379,16 +593,18 @@ class MusicEngine:
         self._ch_transition.fadeout(self._stop_fade)
         self._current_ambient = None
         self._current_ambient_snd = None
+        self._suspended_ambient = None
+        self._suspended_ambient_snd = None
 
     def stop_stinger(self) -> None:
         """Stop stinger early and restore ambient."""
         with self._lock:
             self._pending_stinger = None
+        self._stinger_stop_requested.set()
         self._stinger_cancel.set()
+        self._start_ambient_restore()
         for ch in self._stinger_channels:
             ch.fadeout(self._stop_fade)
-        threading.Thread(target=self._restore_after_stinger_stop,
-                         args=(self._stop_fade,), daemon=True).start()
 
     def get_current_ambient(self) -> str | None:
         return self._current_ambient
